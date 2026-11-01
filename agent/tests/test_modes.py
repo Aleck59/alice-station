@@ -134,10 +134,19 @@ class ModeSwitchTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.mode, MODE_ASSISTANT)
             self.assertEqual(app.volume.history, [0, 50])  # громкость вернулась
             self.assertTrue(app._mic_wanted.is_set())
-            envs = [q.pb_parse(b) for b in sent]
             self.assertIn(q.CANCEL_FRAME[4:], sent)
-            vocal = [e for e in envs if e.get(253) == 210 and 8 in q.pb_parse(e[252])
-                     and q.pb_parse(q.pb_parse(e[252])[8]).get(1) == 18]
+
+            def vocalized():
+                envs = [q.pb_parse(b) for b in sent]
+                return [e for e in envs if e.get(253) == 210 and 8 in q.pb_parse(e[252])
+                        and q.pb_parse(q.pb_parse(e[252])[8]).get(1) == 18]
+
+            # режим переключается до того, как кадр озвучки дойдёт до сервера
+            for _ in range(100):
+                if vocalized():
+                    break
+                await asyncio.sleep(0.02)
+            vocal = vocalized()
             self.assertEqual(len(vocal), 1)  # «Катя на связи…»
             self.assertIn("Катя на связи".encode(), sent[-1])
 
@@ -149,7 +158,10 @@ class ModeSwitchTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.02)
             self.assertEqual(app.mode, MODE_ALICE)
             self.assertFalse(app._mic_wanted.is_set())
-            await asyncio.sleep(0.05)
+            for _ in range(100):
+                if sent and "Возвращаю Алису".encode() in sent[-1]:
+                    break
+                await asyncio.sleep(0.02)
             self.assertIn("Возвращаю Алису".encode(), sent[-1])
 
             # в режиме Алисы обычные фразы не трогаем
