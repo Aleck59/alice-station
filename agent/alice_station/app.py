@@ -68,8 +68,9 @@ class App:
         self.spotter: kws.Spotter | None = None
         self._mic_wanted = asyncio.Event()
         self._switching = False
-        from . import tools
+        from . import midipult, tools
         tools.register(self)
+        self.bridge = midipult.setup(self)  # перекрывает свет/дисплей версиями через Luna
 
     # ---------- состояние ----------
     def set_state(self, state: str) -> None:

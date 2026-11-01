@@ -41,6 +41,9 @@ input_name_hint = "awinic_sar"
 backend = "sysfs"              # sysfs | fb
 brightness = 200
 
+[midipult]
+enabled = "auto"     # auto — включить MCP-мост, если найден MidiPult (:8055) или Luna (:8099)
+
 [panel]
 port = 8060
 pin = ""                       # задайте PIN, если сеть не только ваша

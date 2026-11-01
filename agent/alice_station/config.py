@@ -96,6 +96,13 @@ DEFAULTS: dict[str, Any] = {
         "words": ["катя", "лариса"],
         "threshold": 0.75,
     },
+    "midipult": {
+        # auto — включить мост, если на колонке отвечает MidiPult (:8055) или Luna (:8099)
+        "enabled": "auto",
+        "url": "http://127.0.0.1:8055",
+        "luna_url": "http://127.0.0.1:8099",
+        "timeout": 15,
+    },
     "panel": {
         "enabled": True,
         "host": "0.0.0.0",

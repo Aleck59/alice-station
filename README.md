@@ -33,6 +33,7 @@
 | Слово вызова «Катя»/«Лариса» (Vosk) | ✅ написан, ждёт проверки на колонке |
 | Голосовые профили: xiaozhi.me / Piper / HTTP TTS | ✅ написан |
 | Свет, громкость, таймеры (MCP) | ✅ написан |
+| MCP-мост к MidiPult: циферблат, кольцо, плеер и команды Алисы, сценарии, VPN, Bluetooth | ✅ написан |
 | Радио | ✅ написан |
 | Музыка ВК | 🧩 каркас, способ доступа выбирается |
 | Установщик, автозапуск, откат | ✅ написан |
@@ -67,6 +68,7 @@ agent/alice_station/   агент (Python 3.11+, зависимости: websock
   music.py             плеер, радио, каркас ВК
   quasar_ipc.py        IPC штатной Алисы: фразы, отмена ответа, озвучка
   kws.py               слово вызова (Vosk)
+  midipult.py          MCP-мост к MidiPult и Luna (дисплей, кольцо, Алиса, сценарии)
   panel.py/.html       веб-панель :8060
 agent/tests/           тесты: python3 -m unittest discover -s agent/tests
 deploy/                install.sh, uninstall.sh, автозапуск, .asoundrc, пример конфига

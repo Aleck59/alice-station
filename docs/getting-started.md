@@ -119,3 +119,27 @@ sh /data/opt/alice-station/deploy/uninstall.sh --purge     # удалить вм
 | `self.assistant.return_to_alice` | «вернись к Алисе» в любой формулировке |
 
 Модель в xiaozhi.me сама решает, когда вызвать инструмент, — по описанию инструмента.
+
+### С MidiPult: дисплей, кольцо и всё, что умеет Алиса
+
+Если на колонке стоит [MidiPult](https://github.com/RoBiN19666/midipult) (он поднимает
+Luna на `:8099` и CGI на `:8055`), агент сам находит его и добавляет инструменты:
+
+| Инструмент | Пример фразы |
+|---|---|
+| `self.display.show_text` | «Катя, напиши на часах HELLO» |
+| `self.display.show_time`, `set_brightness`, `off`, `on` | «верни часы», «сделай часы ярче», «погаси экран» |
+| `self.light.set_colors`, `set_rgb`, `off`, `set_brightness` | «сделай кольцо радугой», «подсветку потише» |
+| `alice.send_command` | «Катя, попроси Алису включить свет в спальне» / «…включить мою волну» |
+| `alice.player.control`, `alice.player.status` | «следующий трек», «что играет?» (плеер Алисы) |
+| `midipult.radio.list/play/stop` | «включи радио Рекорд» |
+| `midipult.scenario.list/run` | «запусти сценарий Утро» |
+| `midipult.vpn.set/status` | «включи VPN» |
+| `midipult.bluetooth.set` | «включи режим сопряжения Bluetooth» |
+| `self.system.status`, `midipult.zigbee.devices` | «какая температура процессора?», «какие есть датчики?» |
+
+`alice.send_command` передаёт текст штатной Алисе через Glagol — так ассистенту доступны
+умный дом Яндекса, Яндекс Музыка, будильники и остальные навыки Алисы.
+
+Циферблат семисегментный: латиница без K M V W X Z и цифры, поэтому русский текст на нём
+не показать. Мост выключается в конфиге: `[midipult] enabled = false`.
