@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+/build/
+/dist/
+# секреты и дампы с колонки
+*.token
+config.local.toml
+devices.json
+*.img
