@@ -39,6 +39,15 @@
   </section>
 
   <section>
+    <h2>Режим</h2>
+    <div class="row">
+      <button id="m-alice" class="ghost">Алиса (сток)</button>
+      <button id="m-assistant" class="ghost">Ассистент</button>
+    </div>
+    <p class="muted" id="mode-hint"></p>
+  </section>
+
+  <section>
     <h2>Диалог</h2>
     <button class="big" id="talk">Говорить</button>
     <p class="muted">Состояние: <b id="state">—</b></p>
@@ -98,6 +107,13 @@ function render(s) {
   v.value = s.voice.id;
   const st = $('station');
   if (st.options.length !== s.stations.length) st.innerHTML = s.stations.map(n => `<option>${n}</option>`).join('');
+  for (const md of ['alice', 'assistant']) {
+    $('m-' + md).className = s.mode === md ? '' : 'ghost';
+  }
+  $('m-assistant').textContent = 'Ассистент «' + s.assistant_name + '»';
+  $('mode-hint').textContent = s.mode === 'assistant'
+    ? (s.wakeword.length ? 'Слово вызова: ' + s.wakeword.join(', ') : 'Слово вызова не настроено — кнопка или панель')
+    : '«Алиса, включи ассистента» — переключить голосом' + (s.alice_ipc ? '' : ' (IPC Алисы недоступен)');
   const m = s.music;
   $('now').textContent = m.current ? (m.paused ? '⏸ ' : '♪ ') + m.current.title : '';
 }
@@ -108,6 +124,8 @@ $('vol').onchange = () => act('/api/volume', {volume: +$('vol').value});
 $('voice').onchange = () => act('/api/voice', {profile: $('voice').value});
 $('play').onclick = () => act('/api/radio', {station: $('station').value});
 $('stop').onclick = () => act('/api/radio', {stop: true});
+$('m-alice').onclick = () => act('/api/mode', {mode: 'alice'});
+$('m-assistant').onclick = () => act('/api/mode', {mode: 'assistant'});
 $('reactivate').onclick = () => act('/api/reactivate');
 refresh(); setInterval(refresh, 2000);
 </script>

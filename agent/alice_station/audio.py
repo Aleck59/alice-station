@@ -41,19 +41,25 @@ class Capture:
             env=_env(self.alsa_home))
         log.info("захват запущен: %s @ %d Гц", self.device, self.rate)
 
-    async def frames(self) -> AsyncIterator[bytes]:
-        await self.start()
-        assert self._proc and self._proc.stdout
+    @property
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.returncode is None
+
+    async def read(self) -> bytes:
+        """Один кадр; запускает arecord при необходимости и перезапускает его при падении."""
         while True:
+            await self.start()
+            assert self._proc and self._proc.stdout
             try:
-                chunk = await self._proc.stdout.readexactly(self.frame_bytes)
+                return await self._proc.stdout.readexactly(self.frame_bytes)
             except asyncio.IncompleteReadError:
                 log.warning("arecord завершился, перезапуск через 1 с")
-                await asyncio.sleep(1)
                 self._proc = None
-                await self.start()
-                continue
-            yield chunk
+                await asyncio.sleep(1)
+
+    async def frames(self) -> AsyncIterator[bytes]:
+        while True:
+            yield await self.read()
 
     async def stop(self) -> None:
         if self._proc and self._proc.returncode is None:

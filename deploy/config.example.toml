@@ -17,9 +17,24 @@ capture_device = "alice_mic"     # из /data/alice-station/.asoundrc
 playback_device = "default"
 alsa_home = "/data/alice-station"
 
+[assistant]
+name = "Катя"
+default_mode = "alice"                 # после загрузки — штатная Алиса
+enter_phrases = ["включи ассистента"]  # «Алиса, включи ассистента»
+exit_phrases = ["верни к алисе", "верни алису", "выключи ассистента", "вернись к алисе"]
+mute_alice_reply = true                # заглушить ответ Алисы на фразу включения
+enter_message = "{name} на связи. Чтобы спросить, скажите: {name}."
+exit_message = "Возвращаю Алису."
+
+[wakeword]
+engine = "vosk"                        # vosk | none
+model = "/data/alice-station/models/vosk-model-small-ru-0.22"
+words = ["катя", "лариса"]
+threshold = 0.75                       # выше — меньше ложных срабатываний
+
 [trigger]
 button_enabled = true
-key_code = 582                 # KEY_VOICECOMMAND; эту же кнопку слушает Алиса
+key_code = 582                 # KEY_VOICECOMMAND; работает только в режиме ассистента
 input_name_hint = "awinic_sar"
 
 [led]

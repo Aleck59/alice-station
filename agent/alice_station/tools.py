@@ -56,6 +56,14 @@ def register(app: "App") -> None:
     def _clock(on: bool, names: list | None = None):
         return app.clock.set(names or None, on)
 
+    # ---- режим ----
+    @m.add("self.assistant.return_to_alice",
+           "Выключить ассистента и вернуть штатную Алису. Вызывай, когда пользователь просит "
+           "вернуть Алису, выключить ассистента или «верни к Алисе».")
+    async def _to_alice():
+        asyncio.get_running_loop().create_task(app.return_to_alice())
+        return True
+
     # ---- таймеры ----
     @m.add("self.timer.set", "Поставить таймер на заданное число секунд. label — подпись.",
            {"seconds": prop("integer", minimum=1), "label": prop("string")}, required=["seconds"])

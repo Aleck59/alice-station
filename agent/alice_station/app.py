@@ -5,7 +5,9 @@ import asyncio
 import logging
 import time
 
-from . import audio, device, opus
+from . import audio, device, kws, opus
+from .kws import normalize
+from .quasar_ipc import AliceEvent, AliceIpc, STATUS_RECOGNIZED
 from .config import Config
 from .mcp import McpServer
 from .music import Player as MusicPlayer, RadioProvider, VkProvider
@@ -17,6 +19,12 @@ log = logging.getLogger(__name__)
 
 IDLE, ACTIVATING, CONNECTING, LISTENING, SPEAKING, ERROR = (
     "idle", "activating", "connecting", "listening", "speaking", "error")
+MODE_ALICE, MODE_ASSISTANT = "alice", "assistant"
+
+
+def phrase_match(text: str, phrases: list[str]) -> bool:
+    t = " ".join(normalize(text).split())
+    return any(" ".join(normalize(p).split()) in t for p in phrases)
 
 
 class App:
@@ -52,6 +60,14 @@ class App:
         self._listen_since = 0.0
         self._lock = asyncio.Lock()
         self.timers: dict[int, dict] = {}
+        asst = cfg["assistant"]
+        self.assistant_name = asst["name"]
+        self.mode = asst["default_mode"] if asst["default_mode"] in (MODE_ALICE, MODE_ASSISTANT) else MODE_ALICE
+        self.ipc = AliceIpc(asst["ipc_host"], int(asst["ipc_port"]))
+        self.ipc.on_event = self._on_alice_event
+        self.spotter: kws.Spotter | None = None
+        self._mic_wanted = asyncio.Event()
+        self._switching = False
         from . import tools
         tools.register(self)
 
@@ -73,6 +89,10 @@ class App:
     def status(self) -> dict:
         return {
             "state": self.state,
+            "mode": self.mode,
+            "assistant_name": self.assistant_name,
+            "alice_ipc": self.ipc.connected,
+            "wakeword": self.cfg["wakeword"]["words"] if not isinstance(self.spotter, kws.NullSpotter) else [],
             "activation_code": self.activation_code,
             "activation_message": self.activation_message,
             "last_stt": self.last_stt,
@@ -126,6 +146,8 @@ class App:
                 await asyncio.sleep(3 if ok is None else 10)
 
     async def _announce_code(self, code: str) -> None:
+        if await self.ipc.vocalize("Код активации ассистента: " + ", ".join(code)):
+            return
         p = self.voice.current
         if p.is_local:
             text = "Код активации: " + ", ".join(code)
@@ -141,6 +163,8 @@ class App:
     # ---------- диалог ----------
     async def trigger(self, long_press: bool = False) -> None:
         """Кнопка/панель: idle → начать, speaking → перебить, listening → закончить."""
+        if self.mode == MODE_ALICE:
+            await self.set_mode(MODE_ASSISTANT, announce=False)
         if self.state == IDLE:
             await self.start_session()
         elif self.state == SPEAKING:
@@ -150,7 +174,7 @@ class App:
         elif self.state == ACTIVATING:
             log.info("код активации: %s", self.activation_code)
 
-    async def start_session(self) -> None:
+    async def start_session(self, wake_word: str = "") -> None:
         async with self._lock:
             if self.conn and self.conn.is_open:
                 return
@@ -182,8 +206,11 @@ class App:
                 self._resume_music()
                 return
             self.conn = conn
+            self._update_mic()
             self._encoder = opus.Encoder(up.sample_rate, 1)
             await self.player.play_pcm(audio.tone(880, 120), 16000)
+            if wake_word:
+                await conn.wake_detected(wake_word)
             await conn.listen_start(x["listening_mode"])
             self.set_state(LISTENING)
 
@@ -205,7 +232,10 @@ class App:
         await self._drop_tts()
         await self.player.finish()
         self.set_state(IDLE)
+        if self.spotter:
+            self.spotter.reset()
         self._resume_music()
+        self._update_mic()
 
     def _resume_music(self) -> None:
         if self._music_was_playing:
@@ -231,6 +261,8 @@ class App:
             self.last_stt = msg.get("text", "")
             self._listen_since = time.monotonic()
             log.info(">> %s", self.last_stt)
+            if phrase_match(self.last_stt, self.cfg["assistant"]["exit_phrases"]):
+                asyncio.create_task(self.return_to_alice())
         elif t == "llm":
             self.emotion = msg.get("emotion", "")
         elif t == "mcp":
@@ -285,20 +317,97 @@ class App:
             self._tts_queue.get_nowait()
             self._tts_queue.task_done()
 
+    # ---------- режимы ----------
+    def _update_mic(self) -> None:
+        if self.mode == MODE_ASSISTANT or (self.conn and self.conn.is_open):
+            self._mic_wanted.set()
+        else:
+            self._mic_wanted.clear()
+
+    async def set_mode(self, mode: str, announce: bool = True) -> None:
+        if mode == self.mode:
+            return
+        log.info("режим: %s → %s", self.mode, mode)
+        self.mode = mode
+        if mode == MODE_ASSISTANT:
+            if self.spotter is None:
+                self.spotter = await asyncio.to_thread(kws.create, self.cfg["wakeword"])
+            self.spotter.reset()
+            self._update_mic()
+            if announce:
+                await self._say(self.cfg["assistant"]["enter_message"])
+        else:
+            if self.conn and self.conn.is_open:
+                await self.conn.close()
+            self._update_mic()
+            if announce:
+                await self._say(self.cfg["assistant"]["exit_message"])
+
+    async def _say(self, template: str) -> None:
+        """Короткое системное сообщение голосом Алисы; без IPC — сигнал."""
+        text = template.format(name=self.assistant_name)
+        if not await self.ipc.vocalize(text):
+            await self.player.play_pcm(audio.tone(660, 100) + audio.tone(880, 140), 16000)
+
+    async def return_to_alice(self) -> None:
+        if self.conn and self.conn.is_open:
+            await self.conn.abort()
+        await self._drop_tts()
+        await self.player.stop()
+        await self.set_mode(MODE_ALICE)
+
+    async def _on_alice_event(self, ev: AliceEvent) -> None:
+        if ev.status != STATUS_RECOGNIZED or not ev.text:
+            return
+        log.info("Алиса услышала: %s", ev.text)
+        if self.mode == MODE_ALICE and not self._switching and \
+                phrase_match(ev.text, self.cfg["assistant"]["enter_phrases"]):
+            asyncio.create_task(self._enter_from_alice())
+
+    async def _enter_from_alice(self) -> None:
+        """«Алиса, включи ассистента»: погасить ответ Алисы и включить ассистента."""
+        self._switching = True
+        try:
+            mute = self.cfg["assistant"]["mute_alice_reply"]
+            vol = self.volume.get() if mute else -1
+            if vol > 0:
+                self.volume.set(0)
+            await self.ipc.cancel()
+            await self.ipc.wait_idle(6.0)
+            await asyncio.sleep(0.5)
+            if vol > 0:
+                self.volume.set(vol)
+            await self.set_mode(MODE_ASSISTANT)
+        finally:
+            self._switching = False
+
     # ---------- микрофон ----------
     async def mic_loop(self) -> None:
         idle_timeout = self.cfg["xiaozhi"]["idle_timeout"]
-        async for frame in self.capture.frames():
-            if self.state != LISTENING or not self.conn or not self._encoder:
-                continue
-            if idle_timeout and time.monotonic() - self._listen_since > idle_timeout:
-                log.info("тишина %d с — закрываю канал", idle_timeout)
-                asyncio.create_task(self.end_session())
-                continue
-            try:
-                await self.conn.send_audio(self._encoder.encode(frame))
-            except Exception as e:  # noqa: BLE001
-                log.debug("отправка звука: %s", e)
+        while True:
+            if not self._mic_wanted.is_set():
+                if self.capture.running:
+                    await self.capture.stop()
+                await self._mic_wanted.wait()
+            frame = await self.capture.read()
+            if self.state == LISTENING and self.conn and self._encoder:
+                if idle_timeout and time.monotonic() - self._listen_since > idle_timeout:
+                    log.info("тишина %d с — закрываю канал", idle_timeout)
+                    asyncio.create_task(self.end_session())
+                    continue
+                try:
+                    await self.conn.send_audio(self._encoder.encode(frame))
+                except Exception as e:  # noqa: BLE001
+                    log.debug("отправка звука: %s", e)
+            elif self.mode == MODE_ASSISTANT and self.spotter and self.state in (IDLE, SPEAKING):
+                word = await asyncio.to_thread(self.spotter.feed, frame)
+                if word:
+                    log.info("слово активации: %s", word)
+                    self.spotter.reset()
+                    if self.state == IDLE:
+                        asyncio.create_task(self.start_session(wake_word=word))
+                    else:
+                        asyncio.create_task(self.interrupt())
 
     async def button_loop(self) -> None:
         t = self.cfg["trigger"]
@@ -311,13 +420,22 @@ class App:
         log.info("кнопка: %s, код %s", path, t["key_code"])
         while True:
             try:
-                await device.watch_button(path, t["key_code"], t["long_press_ms"], self.trigger)
+                await device.watch_button(path, t["key_code"], t["long_press_ms"], self._on_button)
             except OSError as e:
                 log.warning("кнопка: %s", e)
                 await asyncio.sleep(5)
 
+    async def _on_button(self, long_press: bool) -> None:
+        # В режиме Алисы кнопка принадлежит Алисе
+        if self.mode == MODE_ASSISTANT:
+            await self.trigger(long_press)
+
     async def run(self) -> None:
-        tasks = [asyncio.create_task(self.mic_loop()), asyncio.create_task(self.button_loop())]
+        tasks = [asyncio.create_task(self.mic_loop()), asyncio.create_task(self.button_loop()),
+                 asyncio.create_task(self.ipc.run())]
+        if self.mode == MODE_ASSISTANT:
+            self.mode = MODE_ALICE
+            await self.set_mode(MODE_ASSISTANT, announce=False)
         if self.cfg["panel"]["enabled"]:
             from .panel import start_panel
             start_panel(self, asyncio.get_running_loop())

@@ -2,6 +2,7 @@
 # Установка Alice Station на Станцию Миди. Запускать НА КОЛОНКЕ из корня репозитория:
 #   sh deploy/install.sh            — установить/обновить
 #   AS_NO_AUTOSTART=1 sh deploy/install.sh — без автозапуска
+#   AS_NO_WAKEWORD=1 sh deploy/install.sh  — без Vosk и модели слова активации
 # Нужно: root, SSH, Entware в /opt (hackalice.me/recipes/packagemanagers/).
 set -eu
 
@@ -19,7 +20,7 @@ grep -q cucumber /proc/device-tree/compatible 2>/dev/null || say "ВНИМАНИ
 
 say "пакеты Entware"
 /opt/bin/opkg update >/dev/null || say "opkg update не удался, пробую с текущими списками"
-for p in python3 python3-pip libopus alsa-utils; do
+for p in python3 python3-pip python3-cffi libopus alsa-utils; do
     /opt/bin/opkg list-installed | grep -q "^$p " || /opt/bin/opkg install "$p"
 done
 
@@ -31,6 +32,26 @@ rm -rf "$DIR/agent/tests"
 
 say "Python-зависимости в $DIR/vendor"
 /opt/bin/python3 -m pip install --quiet --upgrade --target "$DIR/vendor" -r "$SRC/agent/requirements.txt"
+
+if [ "${AS_NO_WAKEWORD:-0}" != 1 ]; then
+    say "слово активации: Vosk + малая русская модель (~45 МБ)"
+    # vosk ставим без зависимостей: srt (субтитры) не нужен и не всегда собирается
+    /opt/bin/python3 -m pip install --quiet --upgrade --target "$DIR/vendor" tqdm requests \
+        && /opt/bin/python3 -m pip install --quiet --upgrade --no-deps --target "$DIR/vendor" vosk \
+        || say "ВНИМАНИЕ: vosk не установился — слово активации будет выключено (кнопка и панель работают)"
+    MODEL=vosk-model-small-ru-0.22
+    if [ ! -d "$DATA/models/$MODEL" ]; then
+        mkdir -p "$DATA/models"
+        /opt/bin/python3 - "$DATA/models" "$MODEL" <<'PY' || say "ВНИМАНИЕ: модель не скачалась — положите $MODEL в $DATA/models вручную"
+import sys, urllib.request, zipfile, os
+dst, name = sys.argv[1], sys.argv[2]
+tmp = os.path.join(dst, name + ".zip")
+urllib.request.urlretrieve("https://alphacephei.com/vosk/models/%s.zip" % name, tmp)
+zipfile.ZipFile(tmp).extractall(dst)
+os.remove(tmp)
+PY
+    fi
+fi
 
 [ -f "$DATA/config.toml" ] || { cp "$SRC/deploy/config.example.toml" "$DATA/config.toml"; say "создан $DATA/config.toml"; }
 cp "$SRC/deploy/asoundrc" "$DATA/.asoundrc"
@@ -59,4 +80,5 @@ fi
 [ -x "$INIT" ] && "$INIT" restart || true
 IP=$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2);print $2}')
 say "готово. Панель: http://${IP:-<IP-колонки>}:8060/  Лог: $DATA/agent.log"
-say "при первом запуске в панели появится код активации — введите его на xiaozhi.me"
+say "колонка работает как обычная Алиса. «Алиса, включи ассистента» — включить ассистента,"
+say "«Катя, верни к Алисе» — вернуть. Первое включение: код активации (голосом и в панели) → xiaozhi.me"

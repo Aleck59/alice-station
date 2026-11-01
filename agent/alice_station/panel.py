@@ -6,6 +6,7 @@ POST /api/talk     — начать/прервать/закончить диал
 POST /api/volume   {"volume": N}
 POST /api/voice    {"profile": id}
 POST /api/radio    {"station": name} | {"stop": true}
+POST /api/mode    {"mode": "alice" | "assistant"}
 POST /api/reactivate — сбросить токен и пройти активацию заново
 
 Если задан panel.pin — заголовок X-Pin или ?pin= обязателен.
@@ -95,6 +96,9 @@ def make_handler(app: "App", loop: asyncio.AbstractEventLoop, pin: str):
                         if not tr:
                             return self._send(404, {"error": "нет такой станции"})
                         run(app.music.play([tr]))
+                elif path == "/api/mode":
+                    run(app.set_mode(str(body["mode"])) if body["mode"] in ("alice", "assistant")
+                        else asyncio.sleep(0))
                 elif path == "/api/reactivate":
                     app.cfg.state.pop("websocket", None)
                     app.cfg.save_state()

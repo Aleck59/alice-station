@@ -73,6 +73,29 @@ DEFAULTS: dict[str, Any] = {
         "stations": {},
         "vk": {"enabled": False},
     },
+    "assistant": {
+        # Имя ассистента — для фраз и сообщений
+        "name": "Катя",
+        # С чего начинать после загрузки: alice — штатная Алиса (сток), assistant — XiaoZhi
+        "default_mode": "alice",
+        # Фразы, услышанные штатной Алисой («Алиса, включи ассистента»)
+        "enter_phrases": ["включи ассистента"],
+        # Фразы, услышанные ассистентом («Катя, верни к Алисе»)
+        "exit_phrases": ["верни к алисе", "верни алису", "выключи ассистента", "вернись к алисе"],
+        # Заглушить ответ Алисы на фразу включения
+        "mute_alice_reply": True,
+        "enter_message": "{name} на связи. Чтобы спросить, скажите: {name}.",
+        "exit_message": "Возвращаю Алису.",
+        "ipc_host": "127.0.0.1",
+        "ipc_port": 9875,
+    },
+    "wakeword": {
+        # vosk — малая русская модель с грамматикой из слов вызова; none — без слова
+        "engine": "vosk",
+        "model": "/data/alice-station/models/vosk-model-small-ru-0.22",
+        "words": ["катя", "лариса"],
+        "threshold": 0.75,
+    },
     "panel": {
         "enabled": True,
         "host": "0.0.0.0",
