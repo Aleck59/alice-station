@@ -56,6 +56,13 @@ def import_vosk():
         import srt  # noqa: F401
     except ImportError:
         sys.modules["srt"] = types.ModuleType("srt")
+    # libvosk собран с C++11 ABI, а libstdc++ из Entware (GCC 8) — без него.
+    # Установщик кладёт libstdc++ посвежее; грузим его до libvosk.so.
+    import ctypes
+    import os
+    lib = os.environ.get("ALICE_STATION_LIBSTDCXX", "/data/opt/alice-station/lib/libstdc++.so.6")
+    if os.path.exists(lib):
+        ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
     import vosk  # type: ignore
     return vosk
 

@@ -28,6 +28,12 @@ xiaozhi.me, не публикуйте этот файл.
 [отключённые обновления](https://hackalice.me/start/ssh/),
 [Entware в /opt](https://hackalice.me/recipes/packagemanagers/).
 
+!!! note "Entware — только aarch64"
+    Userspace Миди 32-битный (armhf), но ядро 64-битное. Ставьте Entware
+    `aarch64-k3.10`: Vosk для armv7 собран под hard-float и в soft-float Entware
+    (`armv7sf-k3.2`) не грузится. libvosk ещё требует libstdc++ с C++11 ABI —
+    установщик сам кладёт её из Ubuntu 20.04 в `/data/opt/alice-station/lib`.
+
 ```sh
 # с компьютера
 scp -P 2222 -r alice-station root@<IP-колонки>:/tmp/
