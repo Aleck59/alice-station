@@ -50,6 +50,30 @@ class VoskSpotter:
     def reset(self) -> None:
         self._rec.Reset()
 
+    def transcriber(self, rate: int = 16000) -> "VoskTranscriber":
+        """Полное распознавание речи на той же модели (без грамматики)."""
+        return VoskTranscriber(import_vosk().KaldiRecognizer(self._model, rate))
+
+
+class VoskTranscriber:
+    def __init__(self, rec):
+        self._rec = rec
+
+    def feed(self, pcm: bytes) -> str | None:
+        """Финальный текст фразы (после паузы) или None, пока говорят."""
+        if not self._rec.AcceptWaveform(pcm):
+            return None
+        return json.loads(self._rec.Result()).get("text", "")
+
+    def partial(self) -> str:
+        return json.loads(self._rec.PartialResult()).get("partial", "")
+
+    def finish(self) -> str:
+        return json.loads(self._rec.FinalResult()).get("text", "")
+
+    def reset(self) -> None:
+        self._rec.Reset()
+
 
 def import_vosk():
     """Модуль vosk тянет `srt` только для субтитров; если его нет — подставляем заглушку."""

@@ -55,6 +55,33 @@
   </section>
 
   <section>
+    <h2>Мозг и голос</h2>
+    <div class="row">
+      <select id="brain" style="flex:1">
+        <option value="xiaozhi">XiaoZhi (облако xiaozhi.me)</option>
+        <option value="claude">Claude + ElevenLabs (как в статье)</option>
+        <option value="openai">OpenAI-совместимая модель + ElevenLabs</option>
+      </select>
+      <select id="sttsel" style="flex:1">
+        <option value="alice">Распознаёт Алиса</option>
+        <option value="vosk">Распознаёт Vosk</option>
+      </select>
+    </div>
+    <div class="row">
+      <input type="password" id="k-anthropic" placeholder="Ключ Anthropic API" style="flex:1">
+      <input type="password" id="k-eleven" placeholder="Ключ ElevenLabs" style="flex:1">
+      <input id="k-voice" placeholder="ElevenLabs voice_id" style="flex:1">
+      <button id="save-keys">Сохранить</button>
+    </div>
+    <div class="row">
+      <input id="llm-url" placeholder="URL OpenAI-совместимого API" style="flex:2">
+      <input id="llm-model" placeholder="Модель" style="flex:1">
+      <input type="password" id="k-llm" placeholder="Ключ этой модели" style="flex:1">
+    </div>
+    <p class="muted" id="keys-hint"></p>
+  </section>
+
+  <section>
     <h2>Громкость</h2>
     <input type="range" min="0" max="100" id="vol">
   </section>
@@ -114,6 +141,15 @@ function render(s) {
   $('mode-hint').textContent = s.mode === 'assistant'
     ? (s.wakeword.length ? 'Слово вызова: ' + s.wakeword.join(', ') : 'Слово вызова не настроено — кнопка или панель')
     : '«Алиса, включи ассистента» — переключить голосом' + (s.alice_ipc ? '' : ' (IPC Алисы недоступен)');
+  if (document.activeElement !== $('brain')) $('brain').value = s.brain;
+  if (document.activeElement !== $('sttsel')) $('sttsel').value = s.stt;
+  if (document.activeElement !== $('k-voice') && !$('k-voice').value) $('k-voice').value = s.keys.elevenlabs_voice || '';
+  if (document.activeElement !== $('llm-url') && !$('llm-url').value) $('llm-url').value = s.llm.url;
+  if (document.activeElement !== $('llm-model') && !$('llm-model').value) $('llm-model').value = s.llm.model;
+  $('keys-hint').textContent = 'Anthropic: ' + (s.keys.anthropic ? 'ключ сохранён' : 'нет ключа') +
+    ' · модель по URL: ' + (s.keys.llm ? 'ключ сохранён' : 'нет ключа') +
+    ' · ElevenLabs: ' + (s.keys.elevenlabs ? 'ключ сохранён' : 'нет ключа') +
+    '. Ключи хранятся на колонке и в панель не возвращаются.';
   const m = s.music;
   $('now').textContent = m.current ? (m.paused ? '⏸ ' : '♪ ') + m.current.title : '';
 }
@@ -127,6 +163,14 @@ $('stop').onclick = () => act('/api/radio', {stop: true});
 $('m-alice').onclick = () => act('/api/mode', {mode: 'alice'});
 $('m-assistant').onclick = () => act('/api/mode', {mode: 'assistant'});
 $('reactivate').onclick = () => act('/api/reactivate');
+$('brain').onchange = () => act('/api/settings', {brain: $('brain').value});
+$('sttsel').onchange = () => act('/api/settings', {stt: $('sttsel').value});
+$('save-keys').onclick = async () => {
+  await act('/api/settings', {anthropic: $('k-anthropic').value, elevenlabs: $('k-eleven').value,
+                              elevenlabs_voice: $('k-voice').value, llm: $('k-llm').value,
+                              llm_url: $('llm-url').value, llm_model: $('llm-model').value});
+  $('k-anthropic').value = ''; $('k-eleven').value = ''; $('k-llm').value = '';
+};
 refresh(); setInterval(refresh, 2000);
 </script>
 </body>

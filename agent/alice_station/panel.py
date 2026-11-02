@@ -99,6 +99,8 @@ def make_handler(app: "App", loop: asyncio.AbstractEventLoop, pin: str):
                 elif path == "/api/mode":
                     run(app.set_mode(str(body["mode"])) if body["mode"] in ("alice", "assistant")
                         else asyncio.sleep(0))
+                elif path == "/api/settings":
+                    run(call(app.update_settings, body))
                 elif path == "/api/reactivate":
                     app.cfg.state.pop("websocket", None)
                     app.cfg.save_state()

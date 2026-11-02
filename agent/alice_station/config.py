@@ -57,6 +57,9 @@ DEFAULTS: dict[str, Any] = {
         "profile": "cloud",
         "profiles": {
             "cloud": {"engine": "cloud", "title": "Голос из xiaozhi.me"},
+            # ключ и voice_id задаются в панели (хранятся в state.json) или здесь
+            "eleven": {"engine": "elevenlabs", "title": "ElevenLabs", "rate": 24000,
+                       "model": "eleven_flash_v2_5"},
         },
     },
     "led": {
@@ -102,6 +105,37 @@ DEFAULTS: dict[str, Any] = {
         # Команды, которые Vosk слышит без слова вызова (выход из режима ассистента)
         "exit_commands": ["выключи ассистента", "выключи ассистент"],
         "threshold": 0.75,
+    },
+    "brain": {
+        # xiaozhi — облако xiaozhi.me (голос, STT и модель там);
+        # claude — конвейер как в статье: распознавание на колонке → Claude API → TTS;
+        # openai — тот же конвейер с OpenAI-совместимой моделью
+        "engine": "xiaozhi",
+        "claude": {
+            "model": "claude-haiku-5-5",
+            "api_key": "",          # лучше задать в панели
+            "max_tokens": 400,
+            "history": 10,          # сколько реплик помнить
+            "history_ttl": 300,     # через сколько секунд тишины забыть разговор
+            "system": "",           # свой системный промпт; {name} — имя ассистента
+        },
+        # openai — любой OpenAI-совместимый /chat/completions с tools (DeepSeek, OpenRouter…)
+        "openai": {
+            "url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "api_key": "",
+            "max_tokens": 400,
+            "history": 10,
+            "history_ttl": 300,
+            "system": "",
+        },
+    },
+    "stt": {
+        # Распознавание для brain = claude: alice — штатный распознаватель Алисы через Luna
+        # (/api/alice/recognize, без её ответа), vosk — малая модель Vosk на колонке
+        "engine": "alice",
+        "timeout": 8,               # сколько ждать вопрос после «Кати»
+        "followup": 5,              # после ответа ещё столько секунд слушать продолжение
     },
     "midipult": {
         # auto — включить мост, если на колонке отвечает MidiPult (:8055) или Luna (:8099)

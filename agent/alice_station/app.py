@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 import logging
 import time
+import urllib.request
 
 from . import audio, device, kws, opus
 from .kws import normalize
 from .quasar_ipc import AliceEvent, AliceIpc, STATUS_LISTENING, STATUS_RECOGNIZED
+from .brain import Claude, OpenAICompat, sentences
 from .config import Config
 from .mcp import McpServer
 from .music import Player as MusicPlayer, RadioProvider, VkProvider
-from .voice import VoiceManager, synthesize
+from .voice import Profile, VoiceManager, synthesize
 from .xiaozhi.ota import OtaClient
 from .xiaozhi.protocol import AudioParams, Connection
 
@@ -71,6 +75,17 @@ class App:
         self._alice_status = 0
         self._own_speech_until = 0.0  # Алиса озвучивает наши фразы — её не глушим
         self._silencing = False
+        self._alice_stt = False       # Алиса распознаёт для нас — не глушить
+        self._pipeline: asyncio.Task | None = None
+        self._stt_q: asyncio.Queue[bytes] | None = None
+        self.brains = {
+            "claude": Claude(cfg["brain"]["claude"], self.mcp,
+                             lambda: self._key("anthropic") or cfg["brain"]["claude"]["api_key"],
+                             self.assistant_name),
+            "openai": OpenAICompat(self._openai_cfg(), self.mcp,
+                                   lambda: self._key("llm") or cfg["brain"]["openai"]["api_key"],
+                                   self.assistant_name),
+        }
         from . import midipult, tools
         tools.register(self)
         self.bridge = midipult.setup(self)  # перекрывает свет/дисплей версиями через Luna
@@ -108,7 +123,65 @@ class App:
             "music": self.music.status(),
             "stations": list(self.radio.stations),
             "connected": bool(self.cfg.state.get("websocket", {}).get("url")),
+            "brain": self.brain_engine,
+            "stt": self.stt_engine,
+            "llm": {"url": self._openai_cfg()["url"], "model": self._openai_cfg()["model"]},
+            "keys": {"anthropic": bool(self._key("anthropic") or self.cfg["brain"]["claude"]["api_key"]),
+                     "llm": bool(self._key("llm") or self.cfg["brain"]["openai"]["api_key"]),
+                     "elevenlabs": bool(self._key("elevenlabs")),
+                     "elevenlabs_voice": self._key("elevenlabs_voice")},
         }
+
+    # ---------- настройки конвейера ----------
+    @property
+    def brain_engine(self) -> str:
+        return self.cfg.state.get("brain_engine") or self.cfg["brain"]["engine"]
+
+    @property
+    def stt_engine(self) -> str:
+        return self.cfg.state.get("stt_engine") or self.cfg["stt"]["engine"]
+
+    def _key(self, name: str) -> str:
+        return str((self.cfg.state.get("keys") or {}).get(name) or "")
+
+    def update_settings(self, body: dict) -> None:
+        """Панель: мозг, распознавание, ключи. Пустые ключи не затирают сохранённые."""
+        st = self.cfg.state
+        if body.get("brain") in ("xiaozhi", "claude", "openai"):
+            st["brain_engine"] = body["brain"]
+        if body.get("stt") in ("alice", "vosk"):
+            st["stt_engine"] = body["stt"]
+        keys = st.setdefault("keys", {})
+        for k in ("anthropic", "llm", "elevenlabs", "elevenlabs_voice"):
+            v = str(body.get(k) or "").strip()
+            if v:
+                keys[k] = v
+        for k in ("llm_url", "llm_model"):
+            v = str(body.get(k) or "").strip()
+            if v:
+                st[k] = v
+        self.brains["openai"].cfg = self._openai_cfg()
+        self.cfg.save_state()
+
+    def _openai_cfg(self) -> dict:
+        c = dict(self.cfg["brain"]["openai"])
+        c["url"] = self.cfg.state.get("llm_url") or c["url"]
+        c["model"] = self.cfg.state.get("llm_model") or c["model"]
+        return c
+
+    @property
+    def brain(self) -> Claude:
+        return self.brains.get(self.brain_engine, self.brains["claude"])
+
+    def _tts_profile(self) -> Profile:
+        """Профиль для локального синтеза; ключи ElevenLabs подставляются из панели."""
+        p = self.voice.current
+        if not p.is_local and self.brain_engine != "xiaozhi":
+            p = self.voice.profiles.get("eleven", p)
+        if p.engine == "elevenlabs":
+            p = dataclasses.replace(p, api_key=p.api_key or self._key("elevenlabs"),
+                                    voice=p.voice or self._key("elevenlabs_voice"))
+        return p
 
     # ---------- активация ----------
     def _ota(self) -> OtaClient:
@@ -179,6 +252,10 @@ class App:
             log.info("код активации: %s", self.activation_code)
 
     async def start_session(self, wake_word: str = "") -> None:
+        if self.brain_engine != "xiaozhi":
+            if self._pipeline is None or self._pipeline.done():
+                self._pipeline = asyncio.create_task(self._pipeline_session())
+            return
         async with self._lock:
             if self.conn and self.conn.is_open:
                 return
@@ -219,6 +296,10 @@ class App:
             self.set_state(LISTENING)
 
     async def interrupt(self) -> None:
+        if self._pipeline and not self._pipeline.done():
+            await self._drop_tts()
+            await self.player.stop()  # сессия сама вернётся к слушанию
+            return
         if self.conn:
             await self.conn.abort()
         await self._drop_tts()
@@ -228,6 +309,8 @@ class App:
             self.set_state(LISTENING)
 
     async def end_session(self) -> None:
+        if self._pipeline and not self._pipeline.done():
+            self._pipeline.cancel()
         if self.conn:
             await self.conn.close()
 
@@ -300,6 +383,100 @@ class App:
             return
         await self.player.write(pcm, rate)
 
+    # ---------- конвейер без XiaoZhi (brain = claude | openai) ----------
+    async def _pipeline_session(self) -> None:
+        """«Катя» → вопрос → Claude → озвучка; потом ещё followup секунд ждём продолжения."""
+        st = self.cfg["stt"]
+        self._music_was_playing = self.music.playing
+        self.music.pause()
+        try:
+            await self.player.play_pcm(audio.tone(880, 120), 16000)
+            timeout = float(st["timeout"])
+            while self.mode == MODE_ASSISTANT:
+                self.set_state(LISTENING)
+                text = (await self._listen(timeout)).strip()
+                if not text:
+                    break
+                self.last_stt = text
+                log.info(">> %s", text)
+                if phrase_match(text, self.cfg["assistant"]["exit_phrases"]):
+                    await self.return_to_alice()
+                    return
+                self.set_state(CONNECTING)
+                try:
+                    reply = await self.brain.ask(text)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Claude: %s", e)
+                    reply = "Не получилось связаться с моделью."
+                self.last_reply = reply
+                log.info("<< %s", reply)
+                self.set_state(SPEAKING)
+                self._ensure_tts_worker()
+                for s in sentences(reply):
+                    await self._tts_queue.put(s)
+                await self._tts_queue.join()
+                await self.player.finish()
+                timeout = float(st["followup"])
+        except asyncio.CancelledError:
+            await self._drop_tts()
+            await self.player.stop()
+            raise
+        finally:
+            self._stt_q = None
+            self.set_state(IDLE)
+            if self.spotter:
+                self.spotter.reset()
+            self._resume_music()
+
+    async def _listen(self, timeout: float) -> str:
+        if self.stt_engine == "vosk" and hasattr(self.spotter, "transcriber"):
+            return await self._listen_vosk(timeout)
+        return await self._listen_alice(timeout)
+
+    async def _listen_alice(self, timeout: float) -> str:
+        """Штатный распознаватель Алисы в режиме recognition-only (Luna), без её ответа."""
+        url = self.cfg["midipult"]["luna_url"].rstrip("/") + \
+            f"/api/alice/recognize?timeout_ms={int(timeout * 1000)}"
+
+        def post() -> dict:
+            req = urllib.request.Request(url, data=b"{}", method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout + 5) as r:
+                return json.loads(r.read() or b"{}")
+
+        self._alice_stt = True
+        try:
+            data = await asyncio.to_thread(post)
+        except Exception as e:  # noqa: BLE001  (таймаут — это тишина)
+            log.debug("recognize: %s", e)
+            return ""
+        finally:
+            await asyncio.sleep(0.3)
+            self._alice_stt = False
+        return str(data.get("transcript") or data.get("text") or
+                   (data.get("result") or {}).get("transcript") or "")
+
+    async def _listen_vosk(self, timeout: float) -> str:
+        rec = self.spotter.transcriber()  # type: ignore[union-attr]
+        self._stt_q = asyncio.Queue()
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return await asyncio.to_thread(rec.finish)
+                try:
+                    frame = await asyncio.wait_for(self._stt_q.get(), left)
+                except asyncio.TimeoutError:
+                    continue
+                text = await asyncio.to_thread(rec.feed, frame)
+                if text:
+                    return text
+                if await asyncio.to_thread(rec.partial):
+                    deadline = max(deadline, time.monotonic() + 1.5)  # говорят — ждём конца фразы
+        finally:
+            self._stt_q = None
+
     # ---------- локальный голос ----------
     def _ensure_tts_worker(self) -> None:
         if self._tts_worker is None or self._tts_worker.done():
@@ -309,7 +486,7 @@ class App:
         while True:
             text = await self._tts_queue.get()
             try:
-                pcm, rate = await synthesize(self.voice.current, text)
+                pcm, rate = await synthesize(self._tts_profile(), text)
                 await self.player.write(pcm, rate)
             except Exception as e:  # noqa: BLE001
                 log.warning("локальный TTS: %s", e)
@@ -332,10 +509,10 @@ class App:
         if mode == self.mode:
             return
         log.info("режим: %s → %s", self.mode, mode)
-        self.mode = mode
+        if mode == MODE_ASSISTANT and self.spotter is None:
+            self.spotter = await asyncio.to_thread(kws.create, self.cfg["wakeword"])
+        self.mode = mode  # после загрузки модели: режим и микрофон меняются вместе
         if mode == MODE_ASSISTANT:
-            if self.spotter is None:
-                self.spotter = await asyncio.to_thread(kws.create, self.cfg["wakeword"])
             self.spotter.reset()
             self._update_mic()
             if announce:
@@ -355,6 +532,8 @@ class App:
             await self.player.play_pcm(audio.tone(660, 100) + audio.tone(880, 140), 16000)
 
     async def return_to_alice(self) -> None:
+        if self._pipeline and not self._pipeline.done() and self._pipeline is not asyncio.current_task():
+            self._pipeline.cancel()
         if self.conn and self.conn.is_open:
             await self.conn.abort()
         await self._drop_tts()
@@ -364,7 +543,8 @@ class App:
     async def _on_alice_event(self, ev: AliceEvent) -> None:
         woke = ev.status == STATUS_LISTENING and self._alice_status != STATUS_LISTENING
         self._alice_status = ev.status
-        if woke and self.mode == MODE_ASSISTANT and self.cfg["assistant"]["alice_deaf"]                 and not self._switching and time.monotonic() > self._own_speech_until:
+        if woke and self.mode == MODE_ASSISTANT and self.cfg["assistant"]["alice_deaf"]                 and not self._switching and not self._alice_stt \
+                and time.monotonic() > self._own_speech_until:
             asyncio.create_task(self._silence_alice())
             return
         if ev.status != STATUS_RECOGNIZED or not ev.text:
@@ -418,7 +598,9 @@ class App:
                     await self.capture.stop()
                 await self._mic_wanted.wait()
             frame = await self.capture.read()
-            if self.state == LISTENING and self.conn and self._encoder:
+            if self._stt_q is not None:
+                self._stt_q.put_nowait(frame)
+            elif self.state == LISTENING and self.conn and self._encoder:
                 if idle_timeout and time.monotonic() - self._listen_since > idle_timeout:
                     log.info("тишина %d с — закрываю канал", idle_timeout)
                     asyncio.create_task(self.end_session())
