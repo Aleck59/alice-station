@@ -1,0 +1,50 @@
+#!/bin/sh
+# Служба VK Музыки. Живёт в /opt/etc/init.d, автозапуск — через /etc/init.d/S99zzvkmusic.
+#   start | stop | restart | status
+APP=/data/vk-music/app
+CONF=/data/vk-music/config.json
+PY=/opt/bin/python3
+PID=/tmp/vk-music.pid
+LOG=/tmp/vk-music.log
+
+running() { [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; }
+
+case "$1" in
+    start)
+        [ -e /data/vk-music/disabled ] && { echo "vk-music: отключена (/data/vk-music/disabled)"; exit 0; }
+        running && { echo "vk-music: уже работает"; exit 0; }
+        # Перезапуск при падении, лог не больше ~512 КБ
+        (
+            cd "$APP" || exit 1
+            while [ ! -e /data/vk-music/disabled ]; do
+                [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 524288 ] && mv -f "$LOG" "$LOG.1"
+                "$PY" -m vkmusic -c "$CONF" >>"$LOG" 2>&1
+                sleep 5
+            done
+        ) </dev/null >/dev/null 2>&1 &
+        echo $! >"$PID"
+        echo "vk-music: запущена"
+        ;;
+    stop)
+        if running; then
+            P=$(cat "$PID")
+            kill "$P" 2>/dev/null
+            # дочерний python и плеер
+            for c in $(ps -o pid,ppid 2>/dev/null | awk -v p="$P" '$2==p{print $1}'); do
+                for g in $(ps -o pid,ppid 2>/dev/null | awk -v p="$c" '$2==p{print $1}'); do kill "$g" 2>/dev/null; done
+                kill "$c" 2>/dev/null
+            done
+        fi
+        rm -f "$PID"
+        echo "vk-music: остановлена"
+        ;;
+    restart)
+        "$0" stop; sleep 1; "$0" start
+        ;;
+    status)
+        running && echo "vk-music: работает (pid $(cat "$PID"))" || { echo "vk-music: не работает"; exit 1; }
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart|status}"; exit 1
+        ;;
+esac

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VK Музыка</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1d1f23;--mut:#6b7280;--acc:#0077ff;--err:#d93025;--line:#e5e7eb}
+@media (prefers-color-scheme:dark){:root{--bg:#141518;--card:#1f2125;--fg:#e8eaed;--mut:#9aa0a6;--acc:#4c9bff;--err:#ff6b5e;--line:#2e3136}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.now{font-size:17px;font-weight:600;min-height:1.4em}
+.sub{color:var(--mut);font-size:13px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+button{border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer;background:var(--line);color:var(--fg)}
+button.acc{background:var(--acc);color:#fff}
+input{flex:1;min-width:0;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+ol{margin:8px 0 0;padding-left:22px}
+li{padding:5px 0;border-bottom:1px solid var(--line);cursor:pointer}
+li:last-child{border-bottom:0}
+.err{color:var(--err);font-size:13px;margin-top:6px;min-height:1em}
+a{color:var(--acc)}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>VK Музыка на колонке</h1>
+
+  <section class="card hidden" id="login">
+    <b>Вход во ВКонтакте</b>
+    <p class="sub">1. Откройте <a id="authlink" target="_blank" rel="noopener">страницу входа ВК</a> и войдите.<br>
+    2. Вас перенесёт на пустую страницу с надписью о том, что адрес нельзя никому передавать. Скопируйте её адрес целиком и вставьте сюда. Он нужен только этой колонке.<br>
+    Музыка играет от имени вашего аккаунта, на условиях ВК для него.</p>
+    <div class="row"><input id="tokurl" placeholder="https://oauth.vk.com/blank.html#access_token=…"><input id="pin" class="hidden" placeholder="PIN" style="max-width:90px"></div>
+    <div class="row"><button class="acc" onclick="login()">Подключить</button></div>
+    <div class="err" id="loginerr"></div>
+  </section>
+
+  <section class="card" id="player">
+    <div class="now" id="now">—</div>
+    <div class="sub" id="nowsub"></div>
+    <div class="row">
+      <button class="acc" onclick="go('/play/wave')">Моя волна</button>
+      <button onclick="go('/play/mine?shuffle=1')">Мои треки</button>
+    </div>
+    <div class="row">
+      <button onclick="go('/prev')">⏮</button>
+      <button onclick="go('/toggle')" id="pp">⏯</button>
+      <button onclick="go('/next')">⏭</button>
+      <button onclick="go('/stop')">⏹</button>
+      <button onclick="go('/like')">♥ В мои</button>
+    </div>
+    <div class="err" id="err"></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="margin-top:0"><input id="q" placeholder="Исполнитель или трек" onkeydown="if(event.key==='Enter')find()"><button onclick="find()">Найти</button></div>
+    <ol id="res"></ol>
+  </section>
+
+  <section class="card">
+    <div class="sub" id="acct"></div>
+    <div class="row"><button onclick="logout()" id="logoutbtn" class="hidden">Выйти из ВК</button></div>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+function pinHdr(){const p=$('pin').value.trim();return p?{'X-Pin':p}:{}}
+async function api(path,body){
+  const opt=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json',...pinHdr()},body:JSON.stringify(body)};
+  const r=await fetch(path,opt);let d={};try{d=await r.json()}catch(e){}
+  if(!r.ok||d.ok===false){const e=new Error(d.error||('HTTP '+r.status));e.status=r.status;throw e}
+  return d;
+}
+function fmt(s){s=s|0;return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
+function text(el,t){el.textContent=t||''}
+async function refresh(){
+  try{
+    const d=await api('/api/status');
+    $('login').classList.toggle('hidden',d.connected);
+    $('logoutbtn').classList.toggle('hidden',!d.connected);
+    text($('acct'),d.connected?('Аккаунт: '+(d.account.name||d.account.id||'подключён')):'ВК не подключён');
+    const p=d.player,c=p.current;
+    text($('now'),c?(c.artist+' — '+c.title):'Ничего не играет');
+    const modes={wave:'Моя волна',mine:'Мои треки',search:'Поиск'};
+    text($('nowsub'),c?((p.paused?'Пауза · ':'')+fmt(p.position)+(c.duration?' / '+fmt(c.duration):'')+' · '+(modes[p.mode]||'')+' · в очереди '+p.queue_len):'');
+    text($('err'),p.error);
+  }catch(e){text($('err'),'служба недоступна: '+e.message)}
+}
+async function go(path){try{await api(path);text($('err'),'')}catch(e){text($('err'),e.message)}setTimeout(refresh,700)}
+async function find(){
+  const q=$('q').value.trim();if(!q)return;
+  try{
+    const d=await api('/api/search?q='+encodeURIComponent(q));const ol=$('res');ol.innerHTML='';
+    if(!d.tracks.length){const li=document.createElement('li');li.textContent='Ничего не нашлось';ol.appendChild(li);return}
+    d.tracks.forEach((t,i)=>{const li=document.createElement('li');li.textContent=t.artist+' — '+t.title+(t.duration?'  ('+fmt(t.duration)+')':'');
+      li.onclick=()=>api('/api/play',{keys:d.tracks.slice(i).map(x=>x.key)}).then(()=>setTimeout(refresh,700)).catch(e=>text($('err'),e.message));ol.appendChild(li)});
+  }catch(e){text($('err'),e.message)}
+}
+async function login(){
+  text($('loginerr'),'Проверяю…');
+  try{await api('/api/auth',{url:$('tokurl').value});$('tokurl').value='';text($('loginerr'),'');refresh()}
+  catch(e){if(e.status===403)$('pin').classList.remove('hidden');text($('loginerr'),e.message)}
+}
+async function logout(){try{await api('/api/logout',{});refresh()}catch(e){if(e.status===403)$('pin').classList.remove('hidden');text($('err'),e.message)}}
+api('/api/auth/url').then(d=>$('authlink').href=d.url).catch(()=>{});
+refresh();setInterval(refresh,3000);
+</script>
+</body>
+</html>

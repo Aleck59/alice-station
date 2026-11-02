@@ -1,0 +1,16 @@
+name: vk-music
+on:
+  push:
+    paths: ["vk-music/**", ".github/workflows/vk-music.yml"]
+  pull_request:
+    paths: ["vk-music/**", ".github/workflows/vk-music.yml"]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m unittest discover -s vk-music/tests -v
+      - run: sh -n vk-music/deploy/install.sh && sh -n vk-music/deploy/uninstall.sh && sh -n vk-music/deploy/S98vkmusic
