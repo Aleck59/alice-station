@@ -61,6 +61,16 @@ class PhraseTest(unittest.TestCase):
         self.assertIsInstance(kws.create({"engine": "none"}), kws.NullSpotter)
         self.assertIsInstance(kws.create({"engine": "vosk", "model": "/nope", "words": words}), kws.NullSpotter)
 
+    def test_kws_exit_command(self):
+        cmds = ["выключи ассистента"]
+        res = {"text": "выключи ассистента", "result": [{"word": "выключи", "conf": 0.9},
+                                                       {"word": "ассистента", "conf": 0.8}]}
+        self.assertEqual(kws.pick_command(res, cmds, 0.75), kws.COMMAND_PREFIX + "выключи ассистента")
+        low = {"text": "выключи ассистента", "result": [{"word": "выключи", "conf": 0.5},
+                                                       {"word": "ассистента", "conf": 0.6}]}
+        self.assertIsNone(kws.pick_command(low, cmds, 0.75))
+        self.assertIsNone(kws.pick_command({"text": "катя", "result": []}, cmds, 0.75))
+
 
 class FakeVolume:
     def __init__(self):
@@ -174,6 +184,39 @@ class ModeSwitchTest(unittest.IsolatedAsyncioTestCase):
 
             ipc_task.cancel()
             srv.close()
+
+    async def test_alice_deaf_in_assistant_mode_and_exit_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = config.load(Path(d) / "config.toml")
+            cfg.data["wakeword"]["engine"] = "none"
+            cfg.data["led"]["enabled"] = False
+            cfg.data["assistant"]["ipc_port"] = 1
+            app = App(cfg)
+            app.player = FakePlayer()
+            app.volume = FakeVolume()
+            calls = []
+
+            async def cancel():
+                calls.append("cancel")
+                return True
+
+            async def wait_idle(t):
+                return True
+
+            app.ipc.cancel, app.ipc.wait_idle = cancel, wait_idle
+            # в режиме Алисы её пробуждение не трогаем
+            await app._on_alice_event(q.AliceEvent(status=q.STATUS_LISTENING))
+            await asyncio.sleep(0.05)
+            self.assertEqual(calls, [])
+            await app._on_alice_event(q.AliceEvent(status=q.STATUS_IDLE))
+            await app.set_mode(MODE_ASSISTANT, announce=False)
+            await app._on_alice_event(q.AliceEvent(status=q.STATUS_LISTENING))
+            await asyncio.sleep(0.5)
+            self.assertEqual(calls, ["cancel"])
+            self.assertEqual(app.volume.history, [0, 50])
+            # кнопка mute возвращает Алису
+            await app._on_mute_button()
+            self.assertEqual(app.mode, MODE_ALICE)
 
     async def test_mcp_tool_returns_to_alice(self):
         with tempfile.TemporaryDirectory() as d:

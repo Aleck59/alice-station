@@ -208,6 +208,21 @@ async def watch_button(path: str, key_code: int, long_press_ms: int,
         os.close(fd)
 
 
+async def watch_any_key(path: str, on_press: Callable[[], Awaitable[None]]) -> None:
+    """Вызывает on_press() на нажатии любой клавиши устройства (кнопка mute: KEY_MUTE)."""
+    loop = asyncio.get_running_loop()
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        while True:
+            data = await loop.run_in_executor(None, os.read, fd, _EVENT.size * 16)
+            for off in range(0, len(data) - _EVENT.size + 1, _EVENT.size):
+                _, _, typ, code, value = _EVENT.unpack_from(data, off)
+                if typ == EV_KEY and value == 1:
+                    await on_press()
+    finally:
+        os.close(fd)
+
+
 def mac_address(preferred: str = "") -> str:
     if preferred:
         return preferred.lower()

@@ -7,7 +7,7 @@ import time
 
 from . import audio, device, kws, opus
 from .kws import normalize
-from .quasar_ipc import AliceEvent, AliceIpc, STATUS_RECOGNIZED
+from .quasar_ipc import AliceEvent, AliceIpc, STATUS_LISTENING, STATUS_RECOGNIZED
 from .config import Config
 from .mcp import McpServer
 from .music import Player as MusicPlayer, RadioProvider, VkProvider
@@ -68,6 +68,9 @@ class App:
         self.spotter: kws.Spotter | None = None
         self._mic_wanted = asyncio.Event()
         self._switching = False
+        self._alice_status = 0
+        self._own_speech_until = 0.0  # Алиса озвучивает наши фразы — её не глушим
+        self._silencing = False
         from . import midipult, tools
         tools.register(self)
         self.bridge = midipult.setup(self)  # перекрывает свет/дисплей версиями через Luna
@@ -347,6 +350,7 @@ class App:
     async def _say(self, template: str) -> None:
         """Короткое системное сообщение голосом Алисы; без IPC — сигнал."""
         text = template.format(name=self.assistant_name)
+        self._own_speech_until = time.monotonic() + 3 + len(text) / 12
         if not await self.ipc.vocalize(text):
             await self.player.play_pcm(audio.tone(660, 100) + audio.tone(880, 140), 16000)
 
@@ -358,12 +362,35 @@ class App:
         await self.set_mode(MODE_ALICE)
 
     async def _on_alice_event(self, ev: AliceEvent) -> None:
+        woke = ev.status == STATUS_LISTENING and self._alice_status != STATUS_LISTENING
+        self._alice_status = ev.status
+        if woke and self.mode == MODE_ASSISTANT and self.cfg["assistant"]["alice_deaf"]                 and not self._switching and time.monotonic() > self._own_speech_until:
+            asyncio.create_task(self._silence_alice())
+            return
         if ev.status != STATUS_RECOGNIZED or not ev.text:
             return
         log.info("Алиса услышала: %s", ev.text)
         if self.mode == MODE_ALICE and not self._switching and \
                 phrase_match(ev.text, self.cfg["assistant"]["enter_phrases"]):
             asyncio.create_task(self._enter_from_alice())
+
+    async def _silence_alice(self) -> None:
+        """Режим ассистента: Алиса проснулась — сразу отменить её диалог и не дать ответить."""
+        if self._silencing:
+            return
+        self._silencing = True
+        vol = self.volume.get()
+        try:
+            log.info("режим ассистента: Алиса проснулась — отменяю")
+            if vol > 0:
+                self.volume.set(0)
+            await self.ipc.cancel()
+            await self.ipc.wait_idle(4.0)
+            await asyncio.sleep(0.3)
+        finally:
+            if vol > 0:
+                self.volume.set(vol)
+            self._silencing = False
 
     async def _enter_from_alice(self) -> None:
         """«Алиса, включи ассистента»: погасить ответ Алисы и включить ассистента."""
@@ -402,7 +429,11 @@ class App:
                     log.debug("отправка звука: %s", e)
             elif self.mode == MODE_ASSISTANT and self.spotter and self.state in (IDLE, SPEAKING):
                 word = await asyncio.to_thread(self.spotter.feed, frame)
-                if word:
+                if word and word.startswith(kws.COMMAND_PREFIX):
+                    log.info("команда: %s", word[len(kws.COMMAND_PREFIX):])
+                    self.spotter.reset()
+                    asyncio.create_task(self.return_to_alice())
+                elif word:
                     log.info("слово активации: %s", word)
                     self.spotter.reset()
                     if self.state == IDLE:
@@ -426,6 +457,28 @@ class App:
                 log.warning("кнопка: %s", e)
                 await asyncio.sleep(5)
 
+    async def mute_button_loop(self) -> None:
+        """Кнопка отключения микрофона: одно нажатие в режиме ассистента — назад к Алисе."""
+        t = self.cfg["trigger"]
+        if not t["mute_exit"]:
+            return
+        path = device.find_input(t["mute_input_name_hint"], 0)
+        if not path:
+            log.info("кнопка mute не найдена (%s)", t["mute_input_name_hint"])
+            return
+        log.info("кнопка mute: %s", path)
+        while True:
+            try:
+                await device.watch_any_key(path, self._on_mute_button)
+            except OSError as e:
+                log.warning("кнопка mute: %s", e)
+                await asyncio.sleep(5)
+
+    async def _on_mute_button(self) -> None:
+        if self.mode == MODE_ASSISTANT:
+            log.info("кнопка mute — возвращаю Алису")
+            await self.return_to_alice()
+
     async def _on_button(self, long_press: bool) -> None:
         # В режиме Алисы кнопка принадлежит Алисе
         if self.mode == MODE_ASSISTANT:
@@ -433,6 +486,7 @@ class App:
 
     async def run(self) -> None:
         tasks = [asyncio.create_task(self.mic_loop()), asyncio.create_task(self.button_loop()),
+                 asyncio.create_task(self.mute_button_loop()),
                  asyncio.create_task(self.ipc.run())]
         if self.mode == MODE_ASSISTANT:
             self.mode = MODE_ALICE

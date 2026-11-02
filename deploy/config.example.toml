@@ -23,6 +23,7 @@ default_mode = "alice"                 # после загрузки — шта�
 enter_phrases = ["включи ассистент", "запусти ассистент"]  # подстрока: «…ассистента» тоже
 exit_phrases = ["верни к алисе", "верни алису", "выключи ассистента", "вернись к алисе"]
 mute_alice_reply = true                # заглушить ответ Алисы на фразу включения
+alice_deaf = true                      # в режиме ассистента Алиса не отвечает (проснулась — отмена)
 enter_message = "{name} на связи. Чтобы спросить, скажите: {name}."
 exit_message = "Возвращаю Алису."
 
@@ -30,12 +31,14 @@ exit_message = "Возвращаю Алису."
 engine = "vosk"                        # vosk | none
 model = "/data/alice-station/models/vosk-model-small-ru-0.22"
 words = ["катя", "лариса"]
+exit_commands = ["выключи ассистента", "выключи ассистент"]  # без слова вызова → назад к Алисе
 threshold = 0.75                       # выше — меньше ложных срабатываний
 
 [trigger]
 button_enabled = true
 key_code = 582                 # KEY_VOICECOMMAND; работает только в режиме ассистента
 input_name_hint = "awinic_sar"
+mute_exit = true               # одно нажатие кнопки отключения микрофона → назад к Алисе
 
 [led]
 backend = "sysfs"              # sysfs | fb

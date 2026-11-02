@@ -48,6 +48,9 @@ DEFAULTS: dict[str, Any] = {
         "key_code": 582,
         "long_press_ms": 600,
         "input_name_hint": "awinic_sar",
+        # Кнопка отключения микрофона: одно нажатие в режиме ассистента — назад к Алисе
+        "mute_exit": True,
+        "mute_input_name_hint": "Name=\"mute\"",
     },
     "voice": {
         # cloud — голос, выбранный в консоли xiaozhi.me
@@ -79,11 +82,13 @@ DEFAULTS: dict[str, Any] = {
         # С чего начинать после загрузки: alice — штатная Алиса (сток), assistant — XiaoZhi
         "default_mode": "alice",
         # Фразы, услышанные штатной Алисой («Алиса, включи ассистента»)
-        "enter_phrases": ["включи ассистента"],
+        "enter_phrases": ["включи ассистент", "запусти ассистент"],
         # Фразы, услышанные ассистентом («Катя, верни к Алисе»)
         "exit_phrases": ["верни к алисе", "верни алису", "выключи ассистента", "вернись к алисе"],
         # Заглушить ответ Алисы на фразу включения
         "mute_alice_reply": True,
+        # В режиме ассистента Алиса не слушает: проснулась — сразу отменяем её диалог
+        "alice_deaf": True,
         "enter_message": "{name} на связи. Чтобы спросить, скажите: {name}.",
         "exit_message": "Возвращаю Алису.",
         "ipc_host": "127.0.0.1",
@@ -94,6 +99,8 @@ DEFAULTS: dict[str, Any] = {
         "engine": "vosk",
         "model": "/data/alice-station/models/vosk-model-small-ru-0.22",
         "words": ["катя", "лариса"],
+        # Команды, которые Vosk слышит без слова вызова (выход из режима ассистента)
+        "exit_commands": ["выключи ассистента", "выключи ассистент"],
         "threshold": 0.75,
     },
     "midipult": {
