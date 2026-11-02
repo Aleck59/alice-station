@@ -21,7 +21,9 @@ log = logging.getLogger(__name__)
 QUASAR = "/system/vendor/quasar"
 DEFAULT_CMD = [QUASAR + "/maind", "--gst-launch",
                "playbin uri={url} audio-sink=alsasink"]
-DEFAULT_ENV = {"LD_LIBRARY_PATH": QUASAR + ":libs"}
+# CA-сертификаты прошивки: без них souphttpsrc/hlsdemux не открывают HTTPS
+DEFAULT_ENV = {"LD_LIBRARY_PATH": QUASAR + ":libs",
+               "SSL_CERT_FILE": QUASAR + "/ca-certificates.crt"}
 
 
 class Player:
