@@ -30,12 +30,13 @@ write_shim() {
     chmod 755 "$SHIM"
 }
 if ! { [ -x "$SHIM" ] && grep -q "$INIT" "$SHIM"; }; then
-    if [ -w /etc/init.d ]; then
-        write_shim
-    elif mount -o remount,rw / 2>/dev/null; then
-        write_shim; sync; mount -o remount,ro / 2>/dev/null || true
-    else
-        echo "ВНИМАНИЕ: не удалось записать $SHIM — автозапуска не будет" >&2
+    # у root [ -w ] истинно и на read-only разделе — пробуем записать, иначе remount
+    if ! write_shim 2>/dev/null; then
+        if mount -o remount,rw / 2>/dev/null; then
+            write_shim; sync; mount -o remount,ro / 2>/dev/null || true
+        else
+            echo "ВНИМАНИЕ: не удалось записать $SHIM — автозапуска не будет" >&2
+        fi
     fi
 fi
 

@@ -13,27 +13,32 @@ case "$1" in
     start)
         [ -e /data/vk-music/disabled ] && { echo "vk-music: отключена (/data/vk-music/disabled)"; exit 0; }
         running && { echo "vk-music: уже работает"; exit 0; }
-        # Перезапуск при падении, лог не больше ~512 КБ
-        (
-            cd "$APP" || exit 1
+        # Перезапуск при падении, лог не больше ~512 КБ.
+        # setsid — чтобы служба не умирала с закрытием adb shell.
+        SETSID=$(command -v setsid || true)
+        $SETSID sh -c '
+            trap "" HUP
+            cd "$1" || exit 1
             while [ ! -e /data/vk-music/disabled ]; do
-                [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 524288 ] && mv -f "$LOG" "$LOG.1"
-                "$PY" -m vkmusic -c "$CONF" >>"$LOG" 2>&1
+                [ -f "$4" ] && [ "$(wc -c <"$4")" -gt 524288 ] && mv -f "$4" "$4.1"
+                "$2" -m vkmusic -c "$3" >>"$4" 2>&1
                 sleep 5
             done
-        ) </dev/null >/dev/null 2>&1 &
+        ' vkmusic "$APP" "$PY" "$CONF" "$LOG" </dev/null >/dev/null 2>&1 &
         echo $! >"$PID"
         echo "vk-music: запущена"
         ;;
     stop)
         if running; then
             P=$(cat "$PID")
-            kill "$P" 2>/dev/null
-            # дочерний python и плеер
-            for c in $(ps -o pid,ppid 2>/dev/null | awk -v p="$P" '$2==p{print $1}'); do
-                for g in $(ps -o pid,ppid 2>/dev/null | awk -v p="$c" '$2==p{print $1}'); do kill "$g" 2>/dev/null; done
-                kill "$c" 2>/dev/null
+            # сначала запомнить детей (python) и внуков (плеер), пока ppid не сменился
+            KIDS=$(ps -o pid,ppid 2>/dev/null | awk -v p="$P" '$2==p{print $1}')
+            GRAND=""
+            for c in $KIDS; do
+                GRAND="$GRAND $(ps -o pid,ppid 2>/dev/null | awk -v p="$c" '$2==p{print $1}')"
             done
+            kill "$P" 2>/dev/null
+            for x in $KIDS $GRAND; do kill "$x" 2>/dev/null; done
         fi
         rm -f "$PID"
         echo "vk-music: остановлена"
