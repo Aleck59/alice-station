@@ -1,0 +1,19 @@
+# ~/.asoundrc для агента Alice Station (кладётся в /data/alice-station/.asoundrc).
+# Агент запускает arecord/aplay с HOME=/data/alice-station, глобальный /etc/asound.conf не трогаем.
+#
+# Микрофоны Миди (hw:0,1, PDM) можно открывать ТОЛЬКО на 96000 Гц — иначе PDM
+# перенастраивается и Алиса глохнет (hackalice.me/devices/station-midi/#mics).
+# Поэтому железо держим на 96 кГц/4 канала, а ALSA (plug) отдаёт 16 кГц моно:
+# клиентский канал 0 = среднее двух передних микрофонов (каналы 0 и 1).
+
+pcm.alice_mic {
+    type plug
+    slave {
+        pcm "hw:0,1"
+        rate 96000
+        channels 4
+        format S16_LE
+    }
+    ttable.0.0 0.5
+    ttable.0.1 0.5
+}

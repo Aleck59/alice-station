@@ -1,0 +1,21 @@
+#!/bin/sh
+# Автозапуск Alice Station. Ставится в /etc/init.d установщиком.
+DATA=/data/alice-station
+PID=/var/run/alice-station.pid
+
+case "$1" in
+    start)
+        [ -e "$DATA/disabled" ] && { echo "alice-station: отключён ($DATA/disabled)"; exit 0; }
+        start-stop-daemon -S -b -m -p "$PID" -x /bin/sh -- /data/opt/alice-station/deploy/run.sh
+        ;;
+    stop)
+        start-stop-daemon -K -p "$PID" -q
+        rm -f "$PID"
+        ;;
+    restart)
+        "$0" stop; sleep 1; "$0" start
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart}"; exit 1
+        ;;
+esac

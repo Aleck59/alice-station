@@ -1,0 +1,85 @@
+# Конфиг Alice Station: /data/alice-station/config.toml
+# Всё, что не указано, берётся из значений по умолчанию (agent/alice_station/config.py).
+
+[device]
+kind = "midi"
+name = "alice-station-midi"
+# mac = ""            # пусто — MAC wlan0
+
+[xiaozhi]
+ota_url = "https://api.tenclass.net/xiaozhi/ota/"
+language = "ru-RU"
+listening_mode = "auto"   # auto — конец фразы определяет сервер
+idle_timeout = 12         # закрыть диалог после стольких секунд тишины
+
+[audio]
+capture_device = "alice_mic"     # из /data/alice-station/.asoundrc
+playback_device = "default"
+alsa_home = "/data/alice-station"
+
+[assistant]
+name = "Катя"
+default_mode = "alice"                 # после загрузки — штатная Алиса
+enter_phrases = ["включи ассистент", "запусти ассистент"]  # подстрока: «…ассистента» тоже
+exit_phrases = ["верни к алисе", "верни алису", "выключи ассистента", "вернись к алисе"]
+mute_alice_reply = true                # заглушить ответ Алисы на фразу включения
+alice_deaf = true                      # в режиме ассистента Алиса не отвечает (проснулась — отмена)
+enter_message = "{name} на связи. Чтобы спросить, скажите: {name}."
+exit_message = "Возвращаю Алису."
+
+[wakeword]
+engine = "vosk"                        # vosk | none
+model = "/data/alice-station/models/vosk-model-small-ru-0.22"
+words = ["катя", "лариса"]
+exit_commands = ["выключи ассистента", "выключи ассистент"]  # без слова вызова → назад к Алисе
+threshold = 0.75                       # выше — меньше ложных срабатываний
+
+[trigger]
+button_enabled = true
+key_code = 582                 # KEY_VOICECOMMAND; работает только в режиме ассистента
+input_name_hint = "awinic_sar"
+mute_exit = true               # одно нажатие кнопки отключения микрофона → назад к Алисе
+
+[led]
+backend = "sysfs"              # sysfs | fb
+brightness = 200
+
+[midipult]
+enabled = "auto"     # auto — включить MCP-мост, если найден MidiPult (:8055) или Luna (:8099)
+
+[panel]
+port = 8060
+pin = ""                       # задайте PIN, если сеть не только ваша
+
+# ---------------- голоса ----------------
+[voice]
+profile = "cloud"
+
+[voice.profiles.cloud]
+engine = "cloud"
+title = "Голос из xiaozhi.me"
+
+# Офлайн-синтез Piper (бинарник и модель положить в /data/alice-station/piper/)
+# [voice.profiles.irina]
+# engine = "command"
+# title = "Ирина (Piper)"
+# rate = 22050
+# cmd = ["/data/alice-station/piper/piper", "--model", "/data/alice-station/piper/ru_RU-irina-medium.onnx", "--output-raw"]
+
+# Любой OpenAI-совместимый TTS
+# [voice.profiles.openai]
+# engine = "http"
+# title = "OpenAI Nova"
+# url = "https://api.openai.com/v1"
+# api_key = "sk-..."
+# model = "tts-1"
+# voice = "nova"
+# rate = 24000
+
+# ---------------- музыка ----------------
+[music.stations]
+"Радио Рекорд" = "https://radiorecord.hostingradio.ru/rr_main96.aacp"
+"Европа Плюс" = "https://ep256.hostingradio.ru:8052/europaplus256.mp3"
+
+[music.vk]
+enabled = false   # провайдер ВК пока каркас, см. docs/roadmap.md

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alice Station</title>
+<style>
+  :root { --bg:#f6f6f8; --card:#fff; --fg:#1b1b1f; --muted:#6b6b76; --accent:#6c4cff; --line:#e3e3ea; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141418; --card:#1e1e24; --fg:#ececf1; --muted:#9a9aa6; --accent:#8f76ff; --line:#2c2c35; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui, sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:16px; }
+  h1 { font-size:22px; margin:8px 0 16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:12px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; }
+  .code { font:600 34px/1 ui-monospace, monospace; letter-spacing:.2em; color:var(--accent); }
+  button, select, input { font:inherit; color:inherit; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:10px 16px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  select, input[type=password] { width:100%; padding:9px; border-radius:10px; border:1px solid var(--line); background:var(--bg); }
+  input[type=range] { width:100%; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:14px; }
+  .big { width:100%; padding:16px; font-size:18px; }
+  #err { color:#d33; min-height:1em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Alice Station</h1>
+  <p id="err"></p>
+
+  <section id="act" hidden>
+    <h2>Активация</h2>
+    <div class="code" id="code"></div>
+    <p class="muted">Добавьте устройство в консоли <a href="https://xiaozhi.me" target="_blank" rel="noopener">xiaozhi.me</a> и введите этот код.</p>
+  </section>
+
+  <section>
+    <h2>Режим</h2>
+    <div class="row">
+      <button id="m-alice" class="ghost">Алиса (сток)</button>
+      <button id="m-assistant" class="ghost">Ассистент</button>
+    </div>
+    <p class="muted" id="mode-hint"></p>
+  </section>
+
+  <section>
+    <h2>Диалог</h2>
+    <button class="big" id="talk">Говорить</button>
+    <p class="muted">Состояние: <b id="state">—</b></p>
+    <p class="muted">Вы: <span id="stt">—</span><br>Ответ: <span id="reply">—</span></p>
+  </section>
+
+  <section>
+    <h2>Мозг и голос</h2>
+    <div class="row">
+      <select id="brain" style="flex:1">
+        <option value="xiaozhi">XiaoZhi (облако xiaozhi.me)</option>
+        <option value="claude">Claude + ElevenLabs (как в статье)</option>
+        <option value="openai">OpenAI-совместимая модель + ElevenLabs</option>
+      </select>
+      <select id="sttsel" style="flex:1">
+        <option value="alice">Распознаёт Алиса</option>
+        <option value="vosk">Распознаёт Vosk</option>
+      </select>
+    </div>
+    <div class="row">
+      <input type="password" id="k-anthropic" placeholder="Ключ Anthropic API" style="flex:1">
+      <input type="password" id="k-eleven" placeholder="Ключ ElevenLabs" style="flex:1">
+      <input id="k-voice" placeholder="ElevenLabs voice_id" style="flex:1">
+      <button id="save-keys">Сохранить</button>
+    </div>
+    <div class="row">
+      <input id="llm-url" placeholder="URL OpenAI-совместимого API" style="flex:2">
+      <input id="llm-model" placeholder="Модель" style="flex:1">
+      <input type="password" id="k-llm" placeholder="Ключ этой модели" style="flex:1">
+    </div>
+    <p class="muted" id="keys-hint"></p>
+  </section>
+
+  <section>
+    <h2>Громкость</h2>
+    <input type="range" min="0" max="100" id="vol">
+  </section>
+
+  <section>
+    <h2>Голос</h2>
+    <select id="voice"></select>
+  </section>
+
+  <section>
+    <h2>Радио</h2>
+    <div class="row"><select id="station" style="flex:1"></select><button id="play">▶</button><button class="ghost" id="stop">■</button></div>
+    <p class="muted" id="now"></p>
+  </section>
+
+  <section>
+    <h2>Обслуживание</h2>
+    <div class="row">
+      <input type="password" id="pin" placeholder="PIN панели (если задан)">
+      <button class="ghost" id="reactivate">Активировать заново</button>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let pin = '';
+try { pin = localStorage.getItem('as-pin') || ''; } catch (e) {}
+$('pin').value = pin;
+$('pin').onchange = () => { pin = $('pin').value; try { localStorage.setItem('as-pin', pin); } catch (e) {} refresh(); };
+
+async function api(path, body) {
+  const r = await fetch(path, {method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json', 'X-Pin': pin},
+                               body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+const labels = {idle:'ожидание', activating:'ждёт активации', connecting:'подключение', listening:'слушаю', speaking:'отвечаю', error:'ошибка'};
+function render(s) {
+  $('err').textContent = '';
+  $('act').hidden = !s.activation_code;
+  $('code').textContent = s.activation_code;
+  $('state').textContent = labels[s.state] || s.state;
+  $('talk').textContent = s.state === 'speaking' ? 'Перебить' : s.state === 'listening' ? 'Закончить' : 'Говорить';
+  $('stt').textContent = s.last_stt || '—';
+  $('reply').textContent = s.last_reply || '—';
+  if (document.activeElement !== $('vol') && s.volume >= 0) $('vol').value = s.volume;
+  const v = $('voice');
+  if (v.options.length !== s.voices.length) v.innerHTML = s.voices.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
+  v.value = s.voice.id;
+  const st = $('station');
+  if (st.options.length !== s.stations.length) st.innerHTML = s.stations.map(n => `<option>${n}</option>`).join('');
+  for (const md of ['alice', 'assistant']) {
+    $('m-' + md).className = s.mode === md ? '' : 'ghost';
+  }
+  $('m-assistant').textContent = 'Ассистент «' + s.assistant_name + '»';
+  $('mode-hint').textContent = s.mode === 'assistant'
+    ? (s.wakeword.length ? 'Слово вызова: ' + s.wakeword.join(', ') : 'Слово вызова не настроено — кнопка или панель')
+    : '«Алиса, включи ассистента» — переключить голосом' + (s.alice_ipc ? '' : ' (IPC Алисы недоступен)');
+  if (document.activeElement !== $('brain')) $('brain').value = s.brain;
+  if (document.activeElement !== $('sttsel')) $('sttsel').value = s.stt;
+  if (document.activeElement !== $('k-voice') && !$('k-voice').value) $('k-voice').value = s.keys.elevenlabs_voice || '';
+  if (document.activeElement !== $('llm-url') && !$('llm-url').value) $('llm-url').value = s.llm.url;
+  if (document.activeElement !== $('llm-model') && !$('llm-model').value) $('llm-model').value = s.llm.model;
+  $('keys-hint').textContent = 'Anthropic: ' + (s.keys.anthropic ? 'ключ сохранён' : 'нет ключа') +
+    ' · модель по URL: ' + (s.keys.llm ? 'ключ сохранён' : 'нет ключа') +
+    ' · ElevenLabs: ' + (s.keys.elevenlabs ? 'ключ сохранён' : 'нет ключа') +
+    '. Ключи хранятся на колонке и в панель не возвращаются.';
+  const m = s.music;
+  $('now').textContent = m.current ? (m.paused ? '⏸ ' : '♪ ') + m.current.title : '';
+}
+async function refresh() { try { render(await api('/api/status')); } catch (e) { $('err').textContent = e.message; } }
+async function act(path, body) { try { render(await api(path, body || {})); } catch (e) { $('err').textContent = e.message; } }
+$('talk').onclick = () => act('/api/talk');
+$('vol').onchange = () => act('/api/volume', {volume: +$('vol').value});
+$('voice').onchange = () => act('/api/voice', {profile: $('voice').value});
+$('play').onclick = () => act('/api/radio', {station: $('station').value});
+$('stop').onclick = () => act('/api/radio', {stop: true});
+$('m-alice').onclick = () => act('/api/mode', {mode: 'alice'});
+$('m-assistant').onclick = () => act('/api/mode', {mode: 'assistant'});
+$('reactivate').onclick = () => act('/api/reactivate');
+$('brain').onchange = () => act('/api/settings', {brain: $('brain').value});
+$('sttsel').onchange = () => act('/api/settings', {stt: $('sttsel').value});
+$('save-keys').onclick = async () => {
+  await act('/api/settings', {anthropic: $('k-anthropic').value, elevenlabs: $('k-eleven').value,
+                              elevenlabs_voice: $('k-voice').value, llm: $('k-llm').value,
+                              llm_url: $('llm-url').value, llm_model: $('llm-model').value});
+  $('k-anthropic').value = ''; $('k-eleven').value = ''; $('k-llm').value = '';
+};
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
