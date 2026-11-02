@@ -1,0 +1,3 @@
+*.sh text eol=lf
+vk-music/deploy/S98vkmusic text eol=lf
+*.py text eol=lf

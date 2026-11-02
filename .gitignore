@@ -8,3 +8,5 @@ __pycache__/
 config.local.toml
 devices.json
 *.img
+__pycache__/
+*.pyc

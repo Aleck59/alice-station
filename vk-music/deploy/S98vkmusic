@@ -1,0 +1,55 @@
+#!/bin/sh
+# Служба VK Музыки. Живёт в /opt/etc/init.d, автозапуск — через /etc/init.d/S99zzvkmusic.
+#   start | stop | restart | status
+APP=/data/vk-music/app
+CONF=/data/vk-music/config.json
+PY=/opt/bin/python3
+PID=/tmp/vk-music.pid
+LOG=/tmp/vk-music.log
+
+running() { [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; }
+
+case "$1" in
+    start)
+        [ -e /data/vk-music/disabled ] && { echo "vk-music: отключена (/data/vk-music/disabled)"; exit 0; }
+        running && { echo "vk-music: уже работает"; exit 0; }
+        # Перезапуск при падении, лог не больше ~512 КБ.
+        # setsid — чтобы служба не умирала с закрытием adb shell.
+        SETSID=$(command -v setsid || true)
+        $SETSID sh -c '
+            trap "" HUP
+            cd "$1" || exit 1
+            while [ ! -e /data/vk-music/disabled ]; do
+                [ -f "$4" ] && [ "$(wc -c <"$4")" -gt 524288 ] && mv -f "$4" "$4.1"
+                "$2" -m vkmusic -c "$3" >>"$4" 2>&1
+                sleep 5
+            done
+        ' vkmusic "$APP" "$PY" "$CONF" "$LOG" </dev/null >/dev/null 2>&1 &
+        echo $! >"$PID"
+        echo "vk-music: запущена"
+        ;;
+    stop)
+        if running; then
+            P=$(cat "$PID")
+            # сначала запомнить детей (python) и внуков (плеер), пока ppid не сменился
+            KIDS=$(ps -o pid,ppid 2>/dev/null | awk -v p="$P" '$2==p{print $1}')
+            GRAND=""
+            for c in $KIDS; do
+                GRAND="$GRAND $(ps -o pid,ppid 2>/dev/null | awk -v p="$c" '$2==p{print $1}')"
+            done
+            kill "$P" 2>/dev/null
+            for x in $KIDS $GRAND; do kill "$x" 2>/dev/null; done
+        fi
+        rm -f "$PID"
+        echo "vk-music: остановлена"
+        ;;
+    restart)
+        "$0" stop; sleep 1; "$0" start
+        ;;
+    status)
+        running && echo "vk-music: работает (pid $(cat "$PID"))" || { echo "vk-music: не работает"; exit 1; }
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart|status}"; exit 1
+        ;;
+esac
