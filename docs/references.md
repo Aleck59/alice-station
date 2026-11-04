@@ -12,6 +12,10 @@
   `main/ota.cc`, `main/protocols/`.
 - **xiaozhi.me** — облако и консоль управления агентами XiaoZhi.
 
+- **MidiPult** — RoBiN19666 и участники. <https://github.com/RoBiN19666/midipult> · MIT.
+  API панели и Luna (циферблат, кольцо, плеер, команды Алисе), формат кадров IPC 9875.
+- **derangedabbot/yandex-station-2-airplay** — описание локального IPC Алисы (текст фраз, отмена).
+
 ## Полезные страницы вики
 
 - Станция Миди: <https://hackalice.me/devices/station-midi/>
