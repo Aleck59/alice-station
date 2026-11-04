@@ -1,8 +1,26 @@
 diff --git a/source/main.go b/source/main.go
-index 60c6693..a127acb 100644
+index 60c6693..5211d6a 100644
 --- a/source/main.go
 +++ b/source/main.go
-@@ -739,7 +739,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -45,6 +45,9 @@ func dataDir() string {
+ 	}
+ 	return filepath.Join(root, "var", "local.ytm-alice")
+ }
++
++var lastStopUnix atomic.Int64
++
+ func runDir() string     { return "/tmp/ytm-alice-run" }
+ func socketPath() string { return filepath.Join(runDir(), "control.sock") }
+ 
+@@ -306,6 +309,7 @@ func (s *Server) command(ctx context.Context, r request) response {
+ 			}
+ 		case "stop":
+ 			s.stopLocked()
++			lastStopUnix.Store(time.Now().Unix())
+ 			s.state.Status = "stopped"
+ 			s.state.PositionMS = 0
+ 			s.state.Error = ""
+@@ -739,7 +743,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			continue
  		}
  		for ctx.Err() == nil {
@@ -13,7 +31,20 @@ index 60c6693..a127acb 100644
  			raw, e := frameRead(c)
  			if e != nil {
  				break
-@@ -806,6 +808,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -778,7 +784,11 @@ func (s *Server) voiceLoop(ctx context.Context) {
+ 			}
+ 			if a != "play" && a != "recommendations" {
+ 				v := s.snapshot()
+-				if v.Status != "playing" && v.Status != "paused" && v.Status != "buffering" && v.Status != "error" {
++				// Midi: after "стоп" keep YouTube the active source for 30 min so
++				// "продолжи" resumes our queue instead of Alice's own radio.
++				recentStop := a == "resume" && v.Status == "stopped" && len(v.Queue) > 0 &&
++					time.Since(time.Unix(lastStopUnix.Load(), 0)) < 30*time.Minute
++				if v.Status != "playing" && v.Status != "paused" && v.Status != "buffering" && v.Status != "error" && !recentStop {
+ 					continue
+ 				}
+ 				// Native Bluetooth control already calls MPRIS; a second Next
+@@ -806,6 +816,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			}
  			last = q
  			lastTime = time.Now()
