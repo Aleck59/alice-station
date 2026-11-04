@@ -233,6 +233,48 @@ class ModeSwitchTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             self.assertEqual(app.mode, MODE_ALICE)
 
+    async def test_alice_voice_profile_speaks_via_ipc(self):
+        from alice_station import voice
+        with tempfile.TemporaryDirectory() as d:
+            cfg = config.load(Path(d) / "config.toml")
+            cfg.data["wakeword"]["engine"] = "none"
+            cfg.data["led"]["enabled"] = False
+            cfg.data["assistant"]["ipc_port"] = 1
+            app = App(cfg)
+            app.player = FakePlayer()
+            sent = []
+
+            async def vocalize(text):
+                sent.append(text)
+                return True
+
+            async def wait_idle(t):
+                return True
+
+            app.ipc.vocalize, app.ipc.wait_idle = vocalize, wait_idle
+            orig = voice.speech_seconds
+            import alice_station.app as appmod
+            appmod.speech_seconds = lambda text: 0.01
+            try:
+                app.voice.set("dude")
+                app._ensure_tts_worker()
+                await app._tts_queue.put("Привет, я <b>чувак</b>.")
+                await asyncio.wait_for(app._tts_queue.join(), 2)
+            finally:
+                appmod.speech_seconds = orig
+            self.assertEqual(sent, ['<speaker voice="dude">Привет, я b чувак /b .'])
+            self.assertGreater(app._own_speech_until, 0)
+
+
+class AliceMarkupTest(unittest.TestCase):
+    def test_markup(self):
+        from alice_station.voice import Profile, alice_markup
+        self.assertEqual(alice_markup(Profile("z", "alice", voice="Zahar"), "Привет"),
+                         '<speaker voice="zahar">Привет')
+        self.assertEqual(alice_markup(Profile("a", "alice"), "Привет"), "Привет")
+        with self.assertRaises(ValueError):
+            alice_markup(Profile("x", "alice", voice='dude" effect="x'), "Привет")
+
 
 if __name__ == "__main__":
     unittest.main()

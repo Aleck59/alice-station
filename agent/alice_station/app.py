@@ -15,7 +15,7 @@ from .brain import Claude, OpenAICompat, sentences
 from .config import Config
 from .mcp import McpServer
 from .music import Player as MusicPlayer, RadioProvider, VkProvider
-from .voice import Profile, VoiceManager, synthesize
+from .voice import Profile, VoiceManager, alice_markup, speech_seconds, synthesize
 from .xiaozhi.ota import OtaClient
 from .xiaozhi.protocol import AudioParams, Connection
 
@@ -486,12 +486,28 @@ class App:
         while True:
             text = await self._tts_queue.get()
             try:
-                pcm, rate = await synthesize(self._tts_profile(), text)
+                p = self._tts_profile()
+                if p.engine == "alice":
+                    await self._alice_speak(p, text)
+                    continue
+                pcm, rate = await synthesize(p, text)
                 await self.player.write(pcm, rate)
             except Exception as e:  # noqa: BLE001
                 log.warning("локальный TTS: %s", e)
             finally:
                 self._tts_queue.task_done()
+
+    async def _alice_speak(self, p, text: str) -> None:
+        """Фраза ассистента синтезом Алисы с голосом профиля (<speaker voice=…>)."""
+        markup = alice_markup(p, text)
+        secs = speech_seconds(text)
+        # своя озвучка Алисы не должна считаться её пробуждением (alice_deaf)
+        self._own_speech_until = time.monotonic() + secs + 2
+        if not await self.ipc.vocalize(markup):
+            raise RuntimeError("нет связи с Алисой (127.0.0.1:9875)")
+        # статуса «говорит» в канале нет — ждём по оценке длительности, чтобы фразы не наложились
+        await asyncio.sleep(secs)
+        await self.ipc.wait_idle(2.0)
 
     async def _drop_tts(self) -> None:
         while not self._tts_queue.empty():

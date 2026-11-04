@@ -60,6 +60,8 @@ DEFAULTS: dict[str, Any] = {
             # ключ и voice_id задаются в панели (хранятся в state.json) или здесь
             "eleven": {"engine": "elevenlabs", "title": "ElevenLabs", "rate": 24000,
                        "model": "eleven_flash_v2_5"},
+            # синтез Алисы другим голосом (только для ответов ассистента)
+            "dude": {"engine": "alice", "title": "Чувак (синтез Алисы)", "voice": "dude"},
         },
     },
     "led": {

@@ -454,21 +454,38 @@ Russian → «Add to my voices» → копируете ID. Свой голос 
     По опыту YandexStation, неверное имя голоса «вешает» синтез: колонка замолкает до
     команды «стоп» или перезагрузки. Пробуйте голоса по одному.
 
-Проверить на колонке — тем же локальным каналом `127.0.0.1:9875`, которым агент уже
-озвучивает фразы (`QuasarIpc.vocalize`, команда `START_VOCALIZE`):
+Проверено на Миди 4 ноября 2026, фраза «Привет, я …» через локальный канал
+`127.0.0.1:9875` (`START_VOCALIZE`):
 
-```sh
-ssh root@192.168.0.161
-cd /data/opt/alice-station/agent && /opt/bin/python3 -c '
-import socket, time
-from alice_station.quasar_ipc import vocalize_frame
-s = socket.create_connection(("127.0.0.1", 9875))
-s.sendall(vocalize_frame("<speaker voice=\"zahar\">Проверка голоса Захара."))
-time.sleep(5)'
+| Результат | Голоса |
+|---|---|
+| сервер принял и озвучил | `shitova`, `shitova.us`, `shitova.gpu`, `alyss` (Алиса), `jane`, `oksana`, `good_oksana`, `omazh`, `ermil`, `ermilov`, `zahar`, `krosh`, `kolya`, `kostya`, `nastya`, `sasha`, `voicesearch`, `robot`, `valtz`, `dude`, `smoky`, `zombie` |
+| `Unsupported voice` | `alena`, `filipp`, `madirus`, `smeshariki`, `dasha`, `julia`, `lera`, `masha`, `marina`, `alexander`, `kirill`, `anton` |
+| нет ответа за 15 с | `levitan`, `zhenya`, `tanya`, `erkanyavas`, `assistant` |
+
+Неверное имя колонку не вешает: сервер отвечает `tts_backend_error Unsupported voice`.
+«Принял» ещё не значит «звучит иначе» — сервер мог подставить голос Алисы.
+
+#### Профиль `engine = "alice"`
+
+Ответы ассистента можно озвучивать этим синтезом нужным голосом:
+
+```toml
+[voice]
+profile = "dude"
+
+[voice.profiles.dude]
+engine = "alice"
+title = "Чувак (синтез Алисы)"
+voice = "dude"            # любой id из таблицы выше; пусто — обычный голос Алисы
 ```
-Работает ли разметка через `START_VOCALIZE`, а не через облачный путь Home Assistant, на Миди
-ещё не проверено. Если голос сменился, можно добавить в агент профиль `engine = "alice"`
-с параметром `voice`: ответы ассистента будет озвучивать синтез Яндекса нужным голосом.
+
+Профиль `dude` есть по умолчанию, выбрать его можно в панели или голосом («смени голос на
+чувака»). Агент отправляет каждую фразу ответа как `<speaker voice="dude">текст` и ждёт,
+пока она прозвучит (по оценке длительности, ~14 символов в секунду: статуса «говорит» в
+канале нет). Угловые скобки из ответа модели вырезаются, чтобы она не подсунула свою
+разметку. Ограничения: нужен интернет (синтез облачный), между фразами бывают паузы, а
+собственные ответы Алисы по-прежнему звучат её голосом.
 
 ### 2.5. Какой выбрать
 
