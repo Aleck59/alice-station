@@ -5,6 +5,10 @@ engine = "command" — локальный синтез любой програм
                      пишет сырой PCM S16 моно в stdout (например, Piper с --output-raw).
 engine = "http"    — OpenAI-совместимый POST {url}/audio/speech, response_format=pcm.
 engine = "elevenlabs" — ElevenLabs text-to-speech, PCM 24 кГц; voice — voice_id.
+engine = "alice"   — облачный синтез штатной Алисы (через локальный канал 127.0.0.1:9875)
+                     с другим голосом: текст уходит как <speaker voice="…">текст.
+                     Сервер принимает, например, dude, zahar, ermil, jane, oksana, omazh,
+                     kolya, kostya, nastya, sasha, robot (проверено на Миди 2026-11-04).
 
 Для локальных профилей облачный звук ответа игнорируется, а текст из
 `tts sentence_start` озвучивается на колонке.
@@ -14,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -64,6 +69,26 @@ async def synthesize(p: Profile, text: str) -> tuple[bytes, int]:
     if p.engine == "elevenlabs":
         return await asyncio.to_thread(_elevenlabs_tts, p, text)
     raise ValueError(f"профиль {p.id}: движок {p.engine} не синтезирует локально")
+
+
+VOICE_ID = re.compile(r"^[a-z0-9_.]{1,40}$")
+
+
+def alice_markup(p: Profile, text: str) -> str:
+    """Текст для синтеза Алисы с голосом профиля. Угловые скобки из текста убираем,
+    чтобы ответ модели не мог подсунуть свою разметку."""
+    clean = " ".join(text.replace("<", " ").replace(">", " ").split())
+    voice = (p.voice or "").strip().lower()
+    if not voice:
+        return clean
+    if not VOICE_ID.match(voice):
+        raise ValueError(f"профиль {p.id}: недопустимое имя голоса {p.voice!r}")
+    return f'<speaker voice="{voice}">{clean}'
+
+
+def speech_seconds(text: str) -> float:
+    """Грубая оценка длительности фразы (≈14 символов в секунду) плюс запас на сеть."""
+    return 1.0 + len(text) / 14
 
 
 def _http_tts(p: Profile, text: str) -> tuple[bytes, int]:

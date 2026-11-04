@@ -59,6 +59,14 @@ profile = "cloud"
 engine = "cloud"
 title = "Голос из xiaozhi.me"
 
+# Синтез Алисы другим голосом: <speaker voice="…">. Работает только для ответов
+# ассистента, собственные ответы Алисы звучат её голосом. Проверено сервером на Миди:
+# dude, zahar, ermil, jane, oksana, omazh, kolya, kostya, nastya, sasha, robot, krosh.
+[voice.profiles.dude]
+engine = "alice"
+title = "Чувак (синтез Алисы)"
+voice = "dude"
+
 # Офлайн-синтез Piper (бинарник и модель положить в /data/alice-station/piper/)
 # [voice.profiles.irina]
 # engine = "command"
