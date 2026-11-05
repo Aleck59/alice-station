@@ -1,5 +1,5 @@
 diff --git a/source/main.go b/source/main.go
-index 60c6693..2b80bb7 100644
+index 60c6693..609cb46 100644
 --- a/source/main.go
 +++ b/source/main.go
 @@ -45,6 +45,9 @@ func dataDir() string {
@@ -12,21 +12,11 @@ index 60c6693..2b80bb7 100644
  func runDir() string     { return "/tmp/ytm-alice-run" }
  func socketPath() string { return filepath.Join(runDir(), "control.sock") }
  
-@@ -127,6 +130,7 @@ type Server struct {
- 	queueCast      bool
- 	radioLoad      *radioLoad
- 	aliceIdle      atomic.Bool
-+	ringFX         chan string
- }
- 
- func (s *Server) snapshot() State {
-@@ -168,6 +172,29 @@ func (s *Server) stopLocked() {
+@@ -168,6 +171,26 @@ func (s *Server) stopLocked() {
  	}
  }
  func (s *Server) command(ctx context.Context, r request) response {
 +	switch r.Action {
-+	case "next", "previous", "pause":
-+		s.ringEffect(r.Action)
 +	case "like":
 +		if err := s.catalog.requireAuth(ctx); err != nil {
 +			return s.catalogError(err)
@@ -43,14 +33,13 @@ index 60c6693..2b80bb7 100644
 +		if _, err := s.catalog.request(ctx, "like/like", map[string]any{"target": map[string]any{"videoId": id}}); err != nil {
 +			return s.catalogError(err)
 +		}
-+		s.ringEffect("like")
 +		v := s.snapshot()
 +		return response{State: &v}
 +	}
  	switch r.Action {
  	case "config-get", "config-set":
  		return s.settingsCommand(r)
-@@ -306,6 +333,7 @@ func (s *Server) command(ctx context.Context, r request) response {
+@@ -306,6 +329,7 @@ func (s *Server) command(ctx context.Context, r request) response {
  			}
  		case "stop":
  			s.stopLocked()
@@ -58,36 +47,7 @@ index 60c6693..2b80bb7 100644
  			s.state.Status = "stopped"
  			s.state.PositionMS = 0
  			s.state.Error = ""
-@@ -490,12 +518,26 @@ func (s *Server) monitor(p *nativePlayer, g uint64, out io.ReadCloser) {
- 	natural := false
- 	for scanner.Scan() {
- 		var ev struct {
--			Event      string `json:"event"`
--			PositionMS int64  `json:"position_ms"`
-+			Event      string    `json:"event"`
-+			PositionMS int64     `json:"position_ms"`
-+			Level      float64   `json:"level"`
-+			Bands      []float64 `json:"bands"`
- 		}
- 		if json.Unmarshal(scanner.Bytes(), &ev) != nil {
- 			continue
- 		}
-+		if ev.Event == "level" {
-+			ringLevel.Store(uint32(math.Max(0, math.Min(1, ev.Level)) * 1000))
-+			for i := range ringBands {
-+				v := ev.Level
-+				if len(ev.Bands) == len(ringBands) {
-+					v = ev.Bands[i]
-+				}
-+				ringBands[i].Store(uint32(math.Max(0, math.Min(1, v)) * 1000))
-+			}
-+			ringLevelAt.Store(time.Now().UnixMilli())
-+			continue
-+		}
- 		s.mu.Lock()
- 		if s.player != p || s.generation != g {
- 			s.mu.Unlock()
-@@ -666,7 +708,7 @@ func voiceAction(text string) (string, string, bool) {
+@@ -666,7 +690,7 @@ func voiceAction(text string) (string, string, bool) {
  	if q == "поставь мои лайки" || q == "включи мои лайки" || q == "включи понравившиеся" {
  		return "play", "мои лайки", true
  	}
@@ -96,7 +56,7 @@ index 60c6693..2b80bb7 100644
  	if a, ok := controls[q]; ok {
  		return a, "", true
  	}
-@@ -739,7 +781,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -739,7 +763,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			continue
  		}
  		for ctx.Err() == nil {
@@ -107,7 +67,7 @@ index 60c6693..2b80bb7 100644
  			raw, e := frameRead(c)
  			if e != nil {
  				break
-@@ -778,7 +822,11 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -778,7 +804,11 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			}
  			if a != "play" && a != "recommendations" {
  				v := s.snapshot()
@@ -120,7 +80,7 @@ index 60c6693..2b80bb7 100644
  					continue
  				}
  				// Native Bluetooth control already calls MPRIS; a second Next
-@@ -806,6 +854,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -806,6 +836,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			}
  			last = q
  			lastTime = time.Now()
@@ -136,23 +96,6 @@ index 60c6693..2b80bb7 100644
  			log.Printf("voice route: %s", a)
  			go func(text string) {
  				c, cancel := context.WithTimeout(ctx, 45*time.Second)
-@@ -855,7 +912,7 @@ func serve() error {
- 	os.Chmod(socketPath(), 0600)
- 	os.WriteFile(filepath.Join(runDir(), "pid"), []byte(strconv.Itoa(os.Getpid())), 0600)
- 	defer os.Remove(filepath.Join(runDir(), "pid"))
--	s := &Server{state: State{Version: version, Status: "stopped", Announce: true, Queue: []Track{}}, catalog: newCatalog()}
-+	s := &Server{state: State{Version: version, Status: "stopped", Announce: true, Queue: []Track{}}, catalog: newCatalog(), ringFX: make(chan string, 4)}
- 	if err := s.loadSettings(); err != nil {
- 		return err
- 	}
-@@ -887,6 +944,7 @@ func serve() error {
- 	go s.mediaLoop(ctx)
- 	go s.castLoop(ctx)
- 	go s.indicatorLoop(ctx)
-+	go s.ringLoop(ctx)
- 	go func() {
- 		for {
- 			conn, err := listener.Accept()
 diff --git a/source/media/alice-media b/source/media/alice-media
 index a1c3557..1599570 100755
 --- a/source/media/alice-media
@@ -173,436 +116,9 @@ index a1c3557..1599570 100755
          /etc/init.d/$service stop
      done
  }
-diff --git a/source/native/player.c b/source/native/player.c
-index d35ebd1..66c5200 100644
---- a/source/native/player.c
-+++ b/source/native/player.c
-@@ -4,6 +4,15 @@
- #include <string.h>
- #include <unistd.h>
- #include <sys/select.h>
-+#include <dlfcn.h>
-+
-+/* Optional firmware symbols for the level meter; resolved at runtime so the
-+ * player still starts on firmware that does not export them. */
-+static const GstStructure *(*p_msg_structure)(GstMessage *);
-+static const gchar *(*p_structure_name)(const GstStructure *);
-+static gchar *(*p_structure_to_string)(const GstStructure *);
-+static void (*p_free)(gpointer);
-+static int spectrum_mode;
- 
- #define PLUGINS(X) X(coreelements) X(playback) X(typefindfunctions) X(audioconvert) X(audioresample) X(alsa_nocapturelog) X(volume) X(audioparsers) X(isomp4) X(libav) X(soup) X(gio) X(audiofx)
- #define DECLARE_PLUGIN(name) GST_PLUGIN_STATIC_DECLARE(name);
-@@ -20,6 +29,67 @@ static gboolean on_message(GstBus *bus, GstMessage *msg, gpointer unused) {
-         { GError *error = NULL; gst_message_parse_error(msg, &error, NULL);
-           if (error) {fprintf(stderr,"playback: %.300s\n",error->message);g_error_free(error);} }
-         puts("{\"event\":\"error\"}"); result = 5; running = 0; break;
-+    case GST_MESSAGE_ELEMENT: {
-+        /* Station Midi ring: report the loudest channel peak, 0..1 over -50..0 dB. */
-+        const GstStructure *st = p_msg_structure ? p_msg_structure(msg) : NULL;
-+        const gchar *sname = st ? p_structure_name(st) : NULL;
-+        if (sname && (!strcmp(sname, "level") || !strcmp(sname, "spectrum"))) {
-+            gchar *text = p_structure_to_string(st);
-+            const char *p = text ? strstr(text, sname[0] == 'l' ? "peak=" : "magnitude=") : NULL;
-+            if (p) p = strpbrk(p, "<{");
-+            if (p && sname[0] == 's') {
-+                /* 128 linear bands (172 Hz each) -> 12 log-spaced bars. */
-+                static const int edge[13] = {0, 1, 2, 3, 4, 6, 8, 11, 15, 21, 29, 41, 58};
-+                double mag[64];
-+                int n = 0;
-+                char *end;
-+                p++;
-+                while (n < 64) {
-+                    double v = strtod(p, &end);
-+                    if (end == p) break;
-+                    mag[n++] = v;
-+                    p = end;
-+                    while (*p == ' ' || *p == ',') p++;
-+                    if (*p == '}' || *p == '>') break;
-+                }
-+                if (n >= 58) {
-+                    char out[256];
-+                    int o = snprintf(out, sizeof out, "{\"event\":\"level\",\"bands\":[");
-+                    double peak = 0;
-+                    for (int b = 0; b < 12; b++) {
-+                        double best = -100;
-+                        for (int i = edge[b]; i < edge[b + 1]; i++) if (mag[i] > best) best = mag[i];
-+                        double x = (best + 62.0 - b * 1.2) / 48.0; /* tilt: highs are quieter */
-+                        if (x < 0) x = 0;
-+                        if (x > 1) x = 1;
-+                        if (x > peak) peak = x;
-+                        o += snprintf(out + o, sizeof out - o, "%s%.2f", b ? "," : "", x);
-+                    }
-+                    snprintf(out + o, sizeof out - o, "],\"level\":%.2f}", peak);
-+                    puts(out);
-+                }
-+            } else if (p) {
-+                double best = -1000;
-+                char *end;
-+                p++;
-+                for (int n = 0; n < 64; n++) {
-+                    double v = strtod(p, &end);
-+                    if (end == p) break;
-+                    if (v > best) best = v;
-+                    p = end;
-+                    while (*p == ' ' || *p == ',') p++;
-+                    if (*p == '}' || *p == '>') break;
-+                }
-+                if (best > -1000) {
-+                    double x = (best + 50.0) / 50.0;
-+                    if (x < 0) x = 0;
-+                    if (x > 1) x = 1;
-+                    printf("{\"event\":\"level\",\"level\":%.3f}\n", x);
-+                }
-+            }
-+            if (text) p_free(text);
-+        }
-+    } break;
-     case GST_MESSAGE_STATE_CHANGED:
-         if (GST_MESSAGE_SRC(msg) == GST_OBJECT(play)) {
-             GstState old, now, pending;
-@@ -42,6 +112,30 @@ int main(int argc, char **argv) {
-     GError *error = NULL;
-     play = gst_parse_launch(description, &error);
-     if (!play || error) { fprintf(stderr,"pipeline: %s\n",error ? error->message : "not created"); return 3; }
-+    p_msg_structure = dlsym(RTLD_DEFAULT, "gst_message_get_structure");
-+    p_structure_name = dlsym(RTLD_DEFAULT, "gst_structure_get_name");
-+    p_structure_to_string = dlsym(RTLD_DEFAULT, "gst_structure_to_string");
-+    p_free = dlsym(RTLD_DEFAULT, "g_free");
-+    if (!p_free) p_free = free;
-+    GstElement *level = NULL;
-+    if (p_msg_structure && p_structure_name && p_structure_to_string) {
-+        GError *lerr = NULL;
-+        level = gst_parse_launch("level", &lerr);
-+        if (lerr) { g_error_free(lerr); lerr = NULL; if (level) gst_object_unref(level); level = NULL; }
-+        if (!level) {
-+            /* Midi firmware: no level plugin, but spectrum is built in. Bass
-+             * bands only, so the ring follows the beat. */
-+            gboolean (*reg)(void) = (gboolean (*)(void))dlsym(RTLD_DEFAULT, "gst_plugin_spectrum_register");
-+            if (reg) reg();
-+            level = gst_parse_launch("spectrum bands=128 threshold=-70 interval=40000000 post-messages=true message-magnitude=true", &lerr);
-+            if (lerr) { g_error_free(lerr); if (level) gst_object_unref(level); level = NULL; }
-+            if (level) spectrum_mode = 1;
-+        }
-+    }
-+    if (level) {
-+        if (!spectrum_mode) g_object_set(level, "interval", (guint64)40000000, "post-messages", TRUE, NULL);
-+        g_object_set(play, "audio-filter", level, NULL);
-+    }
-     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(play));
-     if (!bus) {fputs("no gst bus\n",stderr);return 3;}
-     gst_bus_add_watch(bus, on_message, NULL);
 diff --git a/source/ring.go b/source/ring.go
-new file mode 100644
-index 0000000..44b6384
---- /dev/null
-+++ b/source/ring.go
-@@ -0,0 +1,292 @@
-+package main
-+
-+// Station Midi LED ring (/dev/fb0, 24 pixels) driven by ytm-alice while it
-+// plays: a moving animation during playback and short gestures for voice
-+// controls. Alice's own animations always win: nothing is written while a
-+// dialog is active, and maind redraws the ring itself.
-+
-+import (
-+	"context"
-+	"encoding/json"
-+	"math"
-+	"os"
-+	"strconv"
-+	"strings"
-+	"sync/atomic"
-+	"time"
-+)
-+
-+const ringPixels = 24
-+
-+var ringLevel atomic.Uint32 // 0..1000 from the player's level events, 0 if unknown
-+var ringLevelAt atomic.Int64
-+
-+type ringFX struct {
-+	kind  string
-+	start time.Time
-+}
-+
-+func ringDevice() (string, int) {
-+	if _, err := os.Stat("/dev/fb0"); err != nil {
-+		return "", 0
-+	}
-+	raw, _ := os.ReadFile("/sys/class/graphics/fb0/virtual_size")
-+	if !strings.HasPrefix(strings.TrimSpace(string(raw)), "24,") {
-+		return "", 0
-+	}
-+	bpp := 24
-+	if b, err := os.ReadFile("/sys/class/graphics/fb0/bits_per_pixel"); err == nil {
-+		if n, e := strconv.Atoi(strings.TrimSpace(string(b))); e == nil && (n == 24 || n == 32) {
-+			bpp = n
-+		}
-+	}
-+	return "/dev/fb0", bpp
-+}
-+
-+func (s *Server) ringEffect(kind string) {
-+	select {
-+	case s.ringFX <- kind:
-+	default:
-+	}
-+}
-+
-+func hsv(h, sat, v float64) (float64, float64, float64) {
-+	h = math.Mod(h, 1) * 6
-+	i := math.Floor(h)
-+	f := h - i
-+	p, q, t := v*(1-sat), v*(1-sat*f), v*(1-sat*(1-f))
-+	switch int(i) {
-+	case 0:
-+		return v, t, p
-+	case 1:
-+		return q, v, p
-+	case 2:
-+		return p, v, t
-+	case 3:
-+		return p, q, v
-+	case 4:
-+		return t, p, v
-+	}
-+	return v, p, q
-+}
-+
-+var ringBands [12]atomic.Uint32 // 0..1000 per bar, from the player's spectrum
-+
-+// Theme colours from ledtheme (LED thread): {"ring": [24 x "rrggbb"]}.
-+type ringPalette struct {
-+	at    time.Time
-+	mtime time.Time
-+	cols  [ringPixels][3]float64
-+	ok    bool
-+}
-+
-+func (p *ringPalette) refresh() {
-+	if time.Since(p.at) < 3*time.Second {
-+		return
-+	}
-+	p.at = time.Now()
-+	const path = "/data/led-effects/palette.json"
-+	st, err := os.Stat(path)
-+	if err != nil {
-+		p.ok = false
-+		return
-+	}
-+	if p.ok && st.ModTime().Equal(p.mtime) {
-+		return
-+	}
-+	raw, err := os.ReadFile(path)
-+	if err != nil {
-+		return
-+	}
-+	var v struct {
-+		Ring []string `json:"ring"`
-+	}
-+	if json.Unmarshal(raw, &v) != nil || len(v.Ring) != ringPixels {
-+		p.ok = false
-+		return
-+	}
-+	for i, h := range v.Ring {
-+		n, err := strconv.ParseUint(strings.TrimPrefix(h, "#"), 16, 32)
-+		if err != nil || len(strings.TrimPrefix(h, "#")) != 6 {
-+			p.ok = false
-+			return
-+		}
-+		p.cols[i] = [3]float64{float64(n>>16&255) / 255, float64(n>>8&255) / 255, float64(n&255) / 255}
-+	}
-+	p.mtime, p.ok = st.ModTime(), true
-+}
-+
-+// ringEQ keeps smoothed bar heights so the ring never flickers: bars rise
-+// quickly, fall slowly, and a soft glow stays lit between beats.
-+type ringEQ struct{ bars [12]float64 }
-+
-+func (e *ringEQ) render(px *[ringPixels][3]float64, pal *ringPalette, t float64) {
-+	fresh := time.Since(time.UnixMilli(ringLevelAt.Load())) < time.Second
-+	for b := 0; b < 12; b++ {
-+		target := 0.35 + 0.15*math.Sin(t*1.3+float64(b)*0.5) // idle shimmer without data
-+		if fresh {
-+			target = float64(ringBands[b].Load()) / 1000
-+		}
-+		if target > e.bars[b] {
-+			e.bars[b] += (target - e.bars[b]) * 0.6
-+		} else {
-+			e.bars[b] += (target - e.bars[b]) * 0.12
-+		}
-+	}
-+	// Mirror: bass at the bottom (pixel 0 and 23), highs meeting at the top.
-+	for i := 0; i < ringPixels; i++ {
-+		k := i
-+		if k >= 12 {
-+			k = ringPixels - 1 - k
-+		}
-+		v := 0.10 + 0.90*e.bars[k]
-+		var c [3]float64
-+		if pal.ok {
-+			c = pal.cols[i]
-+		} else {
-+			r, g, bl := hsv(math.Mod(t*0.02, 1)+float64(k)/12*0.6, 0.9, 1)
-+			c = [3]float64{r, g, bl}
-+		}
-+		// Ease between frames as well.
-+		for j := 0; j < 3; j++ {
-+			px[i][j] += (c[j]*v - px[i][j]) * 0.5
-+		}
-+	}
-+}
-+
-+// renderFX returns false when the gesture is over.
-+func renderFX(px *[ringPixels][3]float64, fx ringFX, now time.Time) bool {
-+	e := now.Sub(fx.start).Seconds()
-+	switch fx.kind {
-+	case "next", "previous":
-+		const dur = 0.45
-+		if e > dur {
-+			return false
-+		}
-+		pos := e / dur * ringPixels
-+		for i := 0; i < ringPixels; i++ {
-+			k := float64(i)
-+			if fx.kind == "previous" {
-+				k = float64(ringPixels - 1 - i)
-+			}
-+			d := pos - k
-+			v := 0.0
-+			if d >= 0 && d < 6 {
-+				v = 1 - d/6
-+			}
-+			px[i] = [3]float64{v, v * 0.55, v * 0.15}
-+		}
-+	case "like":
-+		const dur = 0.9
-+		if e > dur {
-+			return false
-+		}
-+		v := math.Pow(math.Sin(e/dur*2*math.Pi*2-math.Pi/2)*0.5+0.5, 2)
-+		for i := range px {
-+			px[i] = [3]float64{v, 0.05 * v, 0.25 * v}
-+		}
-+	case "pause":
-+		const dur = 0.5
-+		if e > dur {
-+			return false
-+		}
-+		for i := range px {
-+			px[i] = [3]float64{px[i][0] * 0.85, px[i][1] * 0.85, px[i][2] * 0.85}
-+		}
-+	default:
-+		return false
-+	}
-+	return true
-+}
-+
-+func (s *Server) ringLoop(ctx context.Context) {
-+	path, bpp := ringDevice()
-+	if path == "" {
-+		return
-+	}
-+	f, err := os.OpenFile(path, os.O_RDWR, 0)
-+	if err != nil {
-+		return
-+	}
-+	defer f.Close()
-+	var px [ringPixels][3]float64
-+	var cur *ringFX
-+	var pal ringPalette
-+	var eq ringEQ
-+	lit := false
-+	start := time.Now()
-+	ticker := time.NewTicker(33 * time.Millisecond)
-+	defer ticker.Stop()
-+	buf := make([]byte, ringPixels*bpp/8)
-+	last := make([]byte, len(buf))
-+	seen := make([]byte, len(buf))
-+	var yieldUntil time.Time
-+	for {
-+		select {
-+		case <-ctx.Done():
-+			return
-+		case k := <-s.ringFX:
-+			cur = &ringFX{kind: k, start: time.Now()}
-+			continue
-+		case <-ticker.C:
-+		}
-+		// If someone else (maind: Bluetooth visualiser, volume, timers) drew
-+		// over our last frame, step aside for a while instead of fighting.
-+		if lit {
-+			if n, _ := f.ReadAt(seen, 0); n == len(seen) && string(seen) != string(last) {
-+				yieldUntil = time.Now().Add(3 * time.Second)
-+				lit = false
-+			}
-+		}
-+		if time.Now().Before(yieldUntil) {
-+			continue
-+		}
-+		if !s.aliceIdle.Load() {
-+			// Alice is talking or listening: her animation owns the ring.
-+			lit = false
-+			continue
-+		}
-+		s.mu.Lock()
-+		status := s.state.Status
-+		enabled := s.settingsLocked().PlaybackLED
-+		s.mu.Unlock()
-+		now := time.Now()
-+		active := false
-+		if cur != nil {
-+			if renderFX(&px, *cur, now) {
-+				active = true
-+			} else {
-+				cur = nil
-+			}
-+		}
-+		if !active && enabled && status == "playing" {
-+			pal.refresh()
-+			eq.render(&px, &pal, now.Sub(start).Seconds())
-+			active = true
-+		}
-+		if !active {
-+			if lit {
-+				for i := range buf {
-+					buf[i] = 0
-+				}
-+				f.WriteAt(buf, 0)
-+				lit = false
-+			}
-+			continue
-+		}
-+		for i := 0; i < ringPixels; i++ {
-+			c := [3]byte{}
-+			for j := 0; j < 3; j++ {
-+				c[j] = byte(math.Max(0, math.Min(1, px[i][j])) * 200)
-+			}
-+			if bpp == 32 {
-+				buf[i*4], buf[i*4+1], buf[i*4+2], buf[i*4+3] = c[2], c[1], c[0], 0
-+			} else {
-+				buf[i*3], buf[i*3+1], buf[i*3+2] = c[0], c[1], c[2]
-+			}
-+		}
-+		f.WriteAt(buf, 0)
-+		copy(last, buf)
-+		lit = true
-+	}
-+}
-diff --git a/source/settings.go b/source/settings.go
-index 8a6088c..0b07b24 100644
---- a/source/settings.go
-+++ b/source/settings.go
-@@ -184,7 +184,7 @@ func (s *Server) settingsCommand(r request) response {
- 		if err := validateSettings(value); err != nil {
- 			return response{Error: err.Error()}
- 		}
--		if p.PlaybackLED != nil && !*p.PlaybackLED && len(playbackLEDPaths("/sys/class/leds")) == 0 {
-+		if p.PlaybackLED != nil && !*p.PlaybackLED && len(playbackLEDPaths("/sys/class/leds")) == 0 && func() bool { d, _ := ringDevice(); return d == "" }() {
- 			return response{Error: "управление подсветкой этой модели пока не поддерживается"}
- 		}
- 		if err := writeSettings(value); err != nil {
+deleted file mode 100644
+index e69de29..0000000
 diff --git a/source/web.go b/source/web.go
 index caf68fb..69eb5a2 100644
 --- a/source/web.go
