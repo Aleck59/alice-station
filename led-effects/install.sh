@@ -9,7 +9,6 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$BASE"
 $PY "$HERE/gen_effects.py" "$BASE" /data/ledpatterns.orig/ring
 cp "$HERE/ledtheme.sh" "$BASE/ledtheme" && chmod 755 "$BASE/ledtheme"
-cp "$HERE/voice_colors.py" "$BASE/voice_colors.py"
 ln -sf "$BASE/ledtheme" /opt/bin/ledtheme 2>/dev/null || true
 "$BASE/ledtheme" mount
 if [ "$1" = --boot ]; then
