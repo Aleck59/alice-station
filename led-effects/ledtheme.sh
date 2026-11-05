@@ -15,6 +15,9 @@
 #                              поставить подсветку в режим лампы (по умолчанию lavalamp);
 #                              включается как обычно: «Алиса, включи лавовую лампу» / в приложении
 #   ledtheme lamp stock        вернуть штатные лампы
+#   ledtheme ringproxy on|off|status
+#                              эквалайзер Алисы и штатные фиолетовые анимации в цветах темы
+#                              (служба ringproxy.py перекрашивает кадры fb0 на лету)
 #   ledtheme restart           перезапустить maind --platformd (кольцо гаснет на пару секунд)
 #
 # maind читает эффекты только при запуске, поэтому после смены темы или лампы
@@ -96,6 +99,31 @@ restart_maind() {
     die "maind не поднялся за 15 с — перезагрузите колонку"
 }
 
+PROXY_PID=/var/run/ringproxy.pid
+
+proxy_running() { [ -f "$PROXY_PID" ] && kill -0 "$(cat "$PROXY_PID")" 2>/dev/null; }
+
+ringproxy() {
+    case "$1" in
+        on)
+            proxy_running && { echo "ringproxy уже работает"; return 0; }
+            [ -f "$BASE/palette.json" ] || echo "ledtheme: нет palette.json — сначала выберите тему" >&2
+            nohup /opt/bin/python3 "$BASE/ringproxy.py" >/data/led-effects/ringproxy.log 2>&1 &
+            echo $! > "$PROXY_PID"
+            touch "$BASE/ringproxy_on"
+            echo "ringproxy включён" ;;
+        off)
+            proxy_running && kill "$(cat "$PROXY_PID")"
+            sleep 1
+            rm -f "$PROXY_PID" "$BASE/ringproxy_on"
+            # на случай падения службы: вернуть триггер всем светодиодам кольца
+            for f in /sys/class/leds/cucumber:*:ring*/trigger; do echo ledfb-ring > "$f"; done
+            echo "ringproxy выключен, кольцо снова повторяет fb0" ;;
+        status) proxy_running && echo "ringproxy: работает" || echo "ringproxy: выключен" ;;
+        *) die "ledtheme ringproxy on|off|status" ;;
+    esac
+}
+
 RESTART=1
 if [ "$1" = --no-restart ]; then RESTART=0; shift; fi
 maybe_restart() { [ "$RESTART" = 1 ] && restart_maind; return 0; }
@@ -119,9 +147,11 @@ case "$1" in
     status)
         is_mounted && echo "копия подключена" || echo "копия НЕ подключена"
         echo "тема: $(cat "$STATE" 2>/dev/null || echo stock)"
-        for f in "$BASE"/lamp.*; do [ -f "$f" ] && echo "лампа ${f##*/lamp.}: $(cat "$f")"; done ;;
+        for f in "$BASE"/lamp.*; do [ -f "$f" ] && echo "лампа ${f##*/lamp.}: $(cat "$f")"; done
+        ringproxy status ;;
     lamp) shift; [ -n "$1" ] || die "ledtheme lamp <подсветка> [лампа]"; set_lamp "$@"; maybe_restart ;;
     restart) restart_maind ;;
-    ""|-h|--help) sed -n '2,28p' "$0" ;;
+    ringproxy) ringproxy "$2" ;;
+    ""|-h|--help) sed -n '2,31p' "$0" ;;
     *) apply_theme "$1"; maybe_restart ;;
 esac

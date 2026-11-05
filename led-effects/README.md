@@ -18,6 +18,7 @@
 | `gen_effects.py` | генерирует темы для Алисы (`alice_listening/thinking/speaking`) и подсветки |
 | `ledtheme.sh` | переключатель на колонке: `ledtheme fire`, `ledtheme random`, `ledtheme lamp party` |
 | `S96ledtheme` | init-скрипт: подключает копию до старта quasar |
+| `ringproxy.py` | служба-перекраска кадров fb0 в цвета темы (эквалайзер) |
 | `install.sh` | установка в `/data/led-effects` (`--boot` — ещё и автозапуск) |
 
 Темы: `aurora` (сияние), `fire`, `ocean`, `rainbow`, `sakura`, `stock`.
@@ -31,6 +32,15 @@
 Кольцо, когда Алиса говорит, — не файл, а визуализатор `ring_spectrogram`.
 Его цвета приходят с сервера Яндекса (кэш `/data/quasar/data/user_config.dat`)
 и перекрывают `quasar.cfg`, поэтому локально их не поменять (проверено 2026-11-05).
+
+## Эквалайзер в цветах темы (ringproxy)
+
+Во время музыки Алиса сама рисует настоящий эквалайзер (`ring_spectrogram`,
+пресеты ball/blink/disco/polar), но только фиолетовым. `ledtheme ringproxy on`
+запускает `ringproxy.py`: он снимает со светодиодов триггер `ledfb-ring`, читает
+кадр `/dev/fb0`, перекрашивает фиолетовые пиксели в цвета темы
+(`/data/led-effects/palette.json`) и пишет в `/sys/class/leds/cucumber:*:ringN`.
+`ledtheme ringproxy off` (или перезагрузка без автозапуска) возвращает триггер.
 
 ## Откат
 

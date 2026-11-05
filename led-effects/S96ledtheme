@@ -9,7 +9,8 @@ case "$1" in
             /data/led-effects/ledtheme --no-restart random >/dev/null 2>&1
         else
             /data/led-effects/ledtheme mount >/dev/null 2>&1
-        fi ;;
-    stop) umount /system/vendor/quasar/ledpatterns 2>/dev/null ;;
+        fi
+        [ -f /data/led-effects/ringproxy_on ] && /data/led-effects/ledtheme ringproxy on >/dev/null 2>&1 ;;
+    stop) /data/led-effects/ledtheme ringproxy off >/dev/null 2>&1; umount /system/vendor/quasar/ledpatterns 2>/dev/null ;;
 esac
 exit 0
