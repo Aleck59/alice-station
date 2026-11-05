@@ -53,6 +53,12 @@ apply_theme() {
     reset_to_stock
     [ "$t" = stock ] || cp "$BASE/themes/$t/ring/"*.led "$ACT/ring/"
     echo "$t" > "$STATE"
+    # палитра для эквалайзера ytm-alice: 24 цвета темы по кругу
+    if [ "$t" = stock ]; then
+        cp "$BASE/palette.stock.json" "$BASE/palette.json"
+    else
+        cp "$BASE/themes/$t/palette.json" "$BASE/palette.json"
+    fi
     # лампы, выбранные раньше, сохраняем
     for f in "$BASE"/lamp.*; do
         [ -f "$f" ] || continue

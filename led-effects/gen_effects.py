@@ -314,6 +314,14 @@ def main() -> None:
             write(out, os.path.join("themes", t), name, p)
     for name, p in EXTRA.items():
         write(out, "extra", name, p)
+    # палитра темы для чужих визуализаторов (эквалайзер ytm-alice):
+    # 24 цвета по кругу, полная яркость; ledtheme кладёт её в /data/led-effects/palette.json
+    import json
+    for t, fn in TINT.items():
+        with open(os.path.join(out, "themes", t, "palette.json"), "w") as fh:
+            json.dump({"theme": t, "ring": [hexc(fn(i, 0)) for i in range(N)]}, fh)
+    with open(os.path.join(out, "palette.stock.json"), "w") as fh:
+        json.dump({"theme": "stock", "ring": ["370fff"] * N}, fh)
     stock = sys.argv[2] if len(sys.argv) > 2 else ""
     if stock:
         for name in RECOLOR:
