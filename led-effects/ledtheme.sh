@@ -55,9 +55,9 @@ apply_theme() {
     echo "$t" > "$STATE"
     # палитра для эквалайзера ytm-alice: 24 цвета темы по кругу
     if [ "$t" = stock ]; then
-        cp "$BASE/palette.stock.json" "$BASE/palette.json"
+        cp "$BASE/palette.stock.json" "$BASE/palette.json"; cp "$BASE/palette.stock.txt" "$BASE/palette.txt"
     else
-        cp "$BASE/themes/$t/palette.json" "$BASE/palette.json"
+        cp "$BASE/themes/$t/palette.json" "$BASE/palette.json"; cp "$BASE/themes/$t/palette.txt" "$BASE/palette.txt"
     fi
     # лампы, выбранные раньше, сохраняем
     for f in "$BASE"/lamp.*; do

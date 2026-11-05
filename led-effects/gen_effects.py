@@ -320,8 +320,13 @@ def main() -> None:
     for t, fn in TINT.items():
         with open(os.path.join(out, "themes", t, "palette.json"), "w") as fh:
             json.dump({"theme": t, "ring": [hexc(fn(i, 0)) for i in range(N)]}, fh)
+        # palette.txt: 4 цвета от баса к верхам (формат, который читает ytm-alice)
+        with open(os.path.join(out, "themes", t, "palette.txt"), "w") as fh:
+            fh.write("".join(hexc(fn(i, 0)) + "\n" for i in (0, 4, 8, 12)))
     with open(os.path.join(out, "palette.stock.json"), "w") as fh:
         json.dump({"theme": "stock", "ring": ["370fff"] * N}, fh)
+    with open(os.path.join(out, "palette.stock.txt"), "w") as fh:
+        fh.write("370fff\n1b077f\n")
     stock = sys.argv[2] if len(sys.argv) > 2 else ""
     if stock:
         for name in RECOLOR:
