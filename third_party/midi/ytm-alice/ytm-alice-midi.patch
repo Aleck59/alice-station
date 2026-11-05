@@ -1,5 +1,5 @@
 diff --git a/source/main.go b/source/main.go
-index 60c6693..58512d9 100644
+index 60c6693..2b80bb7 100644
 --- a/source/main.go
 +++ b/source/main.go
 @@ -45,6 +45,9 @@ func dataDir() string {
@@ -58,28 +58,36 @@ index 60c6693..58512d9 100644
  			s.state.Status = "stopped"
  			s.state.PositionMS = 0
  			s.state.Error = ""
-@@ -490,12 +518,18 @@ func (s *Server) monitor(p *nativePlayer, g uint64, out io.ReadCloser) {
+@@ -490,12 +518,26 @@ func (s *Server) monitor(p *nativePlayer, g uint64, out io.ReadCloser) {
  	natural := false
  	for scanner.Scan() {
  		var ev struct {
 -			Event      string `json:"event"`
 -			PositionMS int64  `json:"position_ms"`
-+			Event      string  `json:"event"`
-+			PositionMS int64   `json:"position_ms"`
-+			Level      float64 `json:"level"`
++			Event      string    `json:"event"`
++			PositionMS int64     `json:"position_ms"`
++			Level      float64   `json:"level"`
++			Bands      []float64 `json:"bands"`
  		}
  		if json.Unmarshal(scanner.Bytes(), &ev) != nil {
  			continue
  		}
 +		if ev.Event == "level" {
 +			ringLevel.Store(uint32(math.Max(0, math.Min(1, ev.Level)) * 1000))
++			for i := range ringBands {
++				v := ev.Level
++				if len(ev.Bands) == len(ringBands) {
++					v = ev.Bands[i]
++				}
++				ringBands[i].Store(uint32(math.Max(0, math.Min(1, v)) * 1000))
++			}
 +			ringLevelAt.Store(time.Now().UnixMilli())
 +			continue
 +		}
  		s.mu.Lock()
  		if s.player != p || s.generation != g {
  			s.mu.Unlock()
-@@ -666,7 +700,7 @@ func voiceAction(text string) (string, string, bool) {
+@@ -666,7 +708,7 @@ func voiceAction(text string) (string, string, bool) {
  	if q == "поставь мои лайки" || q == "включи мои лайки" || q == "включи понравившиеся" {
  		return "play", "мои лайки", true
  	}
@@ -88,7 +96,7 @@ index 60c6693..58512d9 100644
  	if a, ok := controls[q]; ok {
  		return a, "", true
  	}
-@@ -739,7 +773,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -739,7 +781,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			continue
  		}
  		for ctx.Err() == nil {
@@ -99,7 +107,7 @@ index 60c6693..58512d9 100644
  			raw, e := frameRead(c)
  			if e != nil {
  				break
-@@ -778,7 +814,11 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -778,7 +822,11 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			}
  			if a != "play" && a != "recommendations" {
  				v := s.snapshot()
@@ -112,7 +120,7 @@ index 60c6693..58512d9 100644
  					continue
  				}
  				// Native Bluetooth control already calls MPRIS; a second Next
-@@ -806,6 +846,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
+@@ -806,6 +854,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			}
  			last = q
  			lastTime = time.Now()
@@ -128,7 +136,7 @@ index 60c6693..58512d9 100644
  			log.Printf("voice route: %s", a)
  			go func(text string) {
  				c, cancel := context.WithTimeout(ctx, 45*time.Second)
-@@ -855,7 +904,7 @@ func serve() error {
+@@ -855,7 +912,7 @@ func serve() error {
  	os.Chmod(socketPath(), 0600)
  	os.WriteFile(filepath.Join(runDir(), "pid"), []byte(strconv.Itoa(os.Getpid())), 0600)
  	defer os.Remove(filepath.Join(runDir(), "pid"))
@@ -137,7 +145,7 @@ index 60c6693..58512d9 100644
  	if err := s.loadSettings(); err != nil {
  		return err
  	}
-@@ -887,6 +936,7 @@ func serve() error {
+@@ -887,6 +944,7 @@ func serve() error {
  	go s.mediaLoop(ctx)
  	go s.castLoop(ctx)
  	go s.indicatorLoop(ctx)
@@ -146,7 +154,7 @@ index 60c6693..58512d9 100644
  		for {
  			conn, err := listener.Accept()
 diff --git a/source/native/player.c b/source/native/player.c
-index d35ebd1..266d754 100644
+index d35ebd1..66c5200 100644
 --- a/source/native/player.c
 +++ b/source/native/player.c
 @@ -4,6 +4,15 @@
@@ -165,7 +173,7 @@ index d35ebd1..266d754 100644
  
  #define PLUGINS(X) X(coreelements) X(playback) X(typefindfunctions) X(audioconvert) X(audioresample) X(alsa_nocapturelog) X(volume) X(audioparsers) X(isomp4) X(libav) X(soup) X(gio) X(audiofx)
  #define DECLARE_PLUGIN(name) GST_PLUGIN_STATIC_DECLARE(name);
-@@ -20,6 +29,37 @@ static gboolean on_message(GstBus *bus, GstMessage *msg, gpointer unused) {
+@@ -20,6 +29,67 @@ static gboolean on_message(GstBus *bus, GstMessage *msg, gpointer unused) {
          { GError *error = NULL; gst_message_parse_error(msg, &error, NULL);
            if (error) {fprintf(stderr,"playback: %.300s\n",error->message);g_error_free(error);} }
          puts("{\"event\":\"error\"}"); result = 5; running = 0; break;
@@ -177,12 +185,42 @@ index d35ebd1..266d754 100644
 +            gchar *text = p_structure_to_string(st);
 +            const char *p = text ? strstr(text, sname[0] == 'l' ? "peak=" : "magnitude=") : NULL;
 +            if (p) p = strpbrk(p, "<{");
-+            if (p) {
++            if (p && sname[0] == 's') {
++                /* 128 linear bands (172 Hz each) -> 12 log-spaced bars. */
++                static const int edge[13] = {0, 1, 2, 3, 4, 6, 8, 11, 15, 21, 29, 41, 58};
++                double mag[64];
++                int n = 0;
++                char *end;
++                p++;
++                while (n < 64) {
++                    double v = strtod(p, &end);
++                    if (end == p) break;
++                    mag[n++] = v;
++                    p = end;
++                    while (*p == ' ' || *p == ',') p++;
++                    if (*p == '}' || *p == '>') break;
++                }
++                if (n >= 58) {
++                    char out[256];
++                    int o = snprintf(out, sizeof out, "{\"event\":\"level\",\"bands\":[");
++                    double peak = 0;
++                    for (int b = 0; b < 12; b++) {
++                        double best = -100;
++                        for (int i = edge[b]; i < edge[b + 1]; i++) if (mag[i] > best) best = mag[i];
++                        double x = (best + 62.0 - b * 1.2) / 48.0; /* tilt: highs are quieter */
++                        if (x < 0) x = 0;
++                        if (x > 1) x = 1;
++                        if (x > peak) peak = x;
++                        o += snprintf(out + o, sizeof out - o, "%s%.2f", b ? "," : "", x);
++                    }
++                    snprintf(out + o, sizeof out - o, "],\"level\":%.2f}", peak);
++                    puts(out);
++                }
++            } else if (p) {
 +                double best = -1000;
 +                char *end;
-+                int n = 0, limit = sname[0] == 's' ? 3 : 64;
 +                p++;
-+                while (n++ < limit) {
++                for (int n = 0; n < 64; n++) {
 +                    double v = strtod(p, &end);
 +                    if (end == p) break;
 +                    if (v > best) best = v;
@@ -191,7 +229,7 @@ index d35ebd1..266d754 100644
 +                    if (*p == '}' || *p == '>') break;
 +                }
 +                if (best > -1000) {
-+                    double x = sname[0] == 's' ? (best + 60.0) / 45.0 : (best + 50.0) / 50.0;
++                    double x = (best + 50.0) / 50.0;
 +                    if (x < 0) x = 0;
 +                    if (x > 1) x = 1;
 +                    printf("{\"event\":\"level\",\"level\":%.3f}\n", x);
@@ -203,7 +241,7 @@ index d35ebd1..266d754 100644
      case GST_MESSAGE_STATE_CHANGED:
          if (GST_MESSAGE_SRC(msg) == GST_OBJECT(play)) {
              GstState old, now, pending;
-@@ -42,6 +82,30 @@ int main(int argc, char **argv) {
+@@ -42,6 +112,30 @@ int main(int argc, char **argv) {
      GError *error = NULL;
      play = gst_parse_launch(description, &error);
      if (!play || error) { fprintf(stderr,"pipeline: %s\n",error ? error->message : "not created"); return 3; }
@@ -222,7 +260,7 @@ index d35ebd1..266d754 100644
 +             * bands only, so the ring follows the beat. */
 +            gboolean (*reg)(void) = (gboolean (*)(void))dlsym(RTLD_DEFAULT, "gst_plugin_spectrum_register");
 +            if (reg) reg();
-+            level = gst_parse_launch("spectrum bands=16 threshold=-60 interval=40000000 post-messages=true message-magnitude=true", &lerr);
++            level = gst_parse_launch("spectrum bands=128 threshold=-70 interval=40000000 post-messages=true message-magnitude=true", &lerr);
 +            if (lerr) { g_error_free(lerr); if (level) gst_object_unref(level); level = NULL; }
 +            if (level) spectrum_mode = 1;
 +        }
@@ -236,10 +274,10 @@ index d35ebd1..266d754 100644
      gst_bus_add_watch(bus, on_message, NULL);
 diff --git a/source/ring.go b/source/ring.go
 new file mode 100644
-index 0000000..f4a38d2
+index 0000000..0284708
 --- /dev/null
 +++ b/source/ring.go
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,277 @@
 +package main
 +
 +// Station Midi LED ring (/dev/fb0, 24 pixels) driven by ytm-alice while it
@@ -249,6 +287,7 @@ index 0000000..f4a38d2
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"math"
 +	"os"
 +	"strconv"
@@ -311,27 +350,87 @@ index 0000000..f4a38d2
 +	return v, p, q
 +}
 +
-+// renderPlayback: two rotating colour comets; brightness follows the audio
-+// level when the player reports it, otherwise a gentle ~120 bpm pulse.
-+func renderPlayback(px *[ringPixels][3]float64, t float64) {
-+	level := 0.0
-+	if time.Since(time.UnixMilli(ringLevelAt.Load())) < time.Second {
-+		level = float64(ringLevel.Load()) / 1000
-+	} else {
-+		level = 0.55 + 0.45*math.Pow(math.Abs(math.Sin(t*math.Pi*2)), 3)
++var ringBands [12]atomic.Uint32 // 0..1000 per bar, from the player's spectrum
++
++// Theme colours from ledtheme (LED thread): {"ring": [24 x "rrggbb"]}.
++type ringPalette struct {
++	at    time.Time
++	mtime time.Time
++	cols  [ringPixels][3]float64
++	ok    bool
++}
++
++func (p *ringPalette) refresh() {
++	if time.Since(p.at) < 3*time.Second {
++		return
 +	}
-+	head := math.Mod(t*6, ringPixels)
-+	base := math.Mod(t*0.03, 1)
-+	for i := 0; i < ringPixels; i++ {
-+		v := 0.08
-+		for _, h := range []float64{head, math.Mod(head+ringPixels/2, ringPixels)} {
-+			d := math.Mod(h-float64(i)+ringPixels, ringPixels)
-+			if d < 8 {
-+				v = math.Max(v, 1-d/8)
-+			}
++	p.at = time.Now()
++	const path = "/data/led-effects/palette.json"
++	st, err := os.Stat(path)
++	if err != nil {
++		p.ok = false
++		return
++	}
++	if p.ok && st.ModTime().Equal(p.mtime) {
++		return
++	}
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return
++	}
++	var v struct {
++		Ring []string `json:"ring"`
++	}
++	if json.Unmarshal(raw, &v) != nil || len(v.Ring) != ringPixels {
++		p.ok = false
++		return
++	}
++	for i, h := range v.Ring {
++		n, err := strconv.ParseUint(strings.TrimPrefix(h, "#"), 16, 32)
++		if err != nil || len(strings.TrimPrefix(h, "#")) != 6 {
++			p.ok = false
++			return
 +		}
-+		r, g, b := hsv(base+float64(i)/ringPixels*0.35, 0.85, v*(0.25+0.75*level))
-+		px[i] = [3]float64{r, g, b}
++		p.cols[i] = [3]float64{float64(n>>16&255) / 255, float64(n>>8&255) / 255, float64(n&255) / 255}
++	}
++	p.mtime, p.ok = st.ModTime(), true
++}
++
++// ringEQ keeps smoothed bar heights so the ring never flickers: bars rise
++// quickly, fall slowly, and a soft glow stays lit between beats.
++type ringEQ struct{ bars [12]float64 }
++
++func (e *ringEQ) render(px *[ringPixels][3]float64, pal *ringPalette, t float64) {
++	fresh := time.Since(time.UnixMilli(ringLevelAt.Load())) < time.Second
++	for b := 0; b < 12; b++ {
++		target := 0.35 + 0.15*math.Sin(t*1.3+float64(b)*0.5) // idle shimmer without data
++		if fresh {
++			target = float64(ringBands[b].Load()) / 1000
++		}
++		if target > e.bars[b] {
++			e.bars[b] += (target - e.bars[b]) * 0.6
++		} else {
++			e.bars[b] += (target - e.bars[b]) * 0.12
++		}
++	}
++	// Mirror: bass at the bottom (pixel 0 and 23), highs meeting at the top.
++	for i := 0; i < ringPixels; i++ {
++		k := i
++		if k >= 12 {
++			k = ringPixels - 1 - k
++		}
++		v := 0.10 + 0.90*e.bars[k]
++		var c [3]float64
++		if pal.ok {
++			c = pal.cols[i]
++		} else {
++			r, g, bl := hsv(math.Mod(t*0.02, 1)+float64(k)/12*0.6, 0.9, 1)
++			c = [3]float64{r, g, bl}
++		}
++		// Ease between frames as well.
++		for j := 0; j < 3; j++ {
++			px[i][j] += (c[j]*v - px[i][j]) * 0.5
++		}
 +	}
 +}
 +
@@ -392,6 +491,8 @@ index 0000000..f4a38d2
 +	defer f.Close()
 +	var px [ringPixels][3]float64
 +	var cur *ringFX
++	var pal ringPalette
++	var eq ringEQ
 +	lit := false
 +	start := time.Now()
 +	ticker := time.NewTicker(33 * time.Millisecond)
@@ -425,7 +526,8 @@ index 0000000..f4a38d2
 +			}
 +		}
 +		if !active && enabled && status == "playing" {
-+			renderPlayback(&px, now.Sub(start).Seconds())
++			pal.refresh()
++			eq.render(&px, &pal, now.Sub(start).Seconds())
 +			active = true
 +		}
 +		if !active {
