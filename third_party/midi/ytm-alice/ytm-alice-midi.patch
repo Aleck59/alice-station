@@ -1,0 +1,442 @@
+diff --git a/source/main.go b/source/main.go
+index 60c6693..58512d9 100644
+--- a/source/main.go
++++ b/source/main.go
+@@ -45,6 +45,9 @@ func dataDir() string {
+ 	}
+ 	return filepath.Join(root, "var", "local.ytm-alice")
+ }
++
++var lastStopUnix atomic.Int64
++
+ func runDir() string     { return "/tmp/ytm-alice-run" }
+ func socketPath() string { return filepath.Join(runDir(), "control.sock") }
+ 
+@@ -127,6 +130,7 @@ type Server struct {
+ 	queueCast      bool
+ 	radioLoad      *radioLoad
+ 	aliceIdle      atomic.Bool
++	ringFX         chan string
+ }
+ 
+ func (s *Server) snapshot() State {
+@@ -168,6 +172,29 @@ func (s *Server) stopLocked() {
+ 	}
+ }
+ func (s *Server) command(ctx context.Context, r request) response {
++	switch r.Action {
++	case "next", "previous", "pause":
++		s.ringEffect(r.Action)
++	case "like":
++		if err := s.catalog.requireAuth(ctx); err != nil {
++			return s.catalogError(err)
++		}
++		s.mu.Lock()
++		id := ""
++		if s.state.Index >= 0 && s.state.Index < len(s.state.Queue) {
++			id = s.state.Queue[s.state.Index].ID
++		}
++		s.mu.Unlock()
++		if id == "" {
++			return response{Error: "сейчас ничего не играет"}
++		}
++		if _, err := s.catalog.request(ctx, "like/like", map[string]any{"target": map[string]any{"videoId": id}}); err != nil {
++			return s.catalogError(err)
++		}
++		s.ringEffect("like")
++		v := s.snapshot()
++		return response{State: &v}
++	}
+ 	switch r.Action {
+ 	case "config-get", "config-set":
+ 		return s.settingsCommand(r)
+@@ -306,6 +333,7 @@ func (s *Server) command(ctx context.Context, r request) response {
+ 			}
+ 		case "stop":
+ 			s.stopLocked()
++			lastStopUnix.Store(time.Now().Unix())
+ 			s.state.Status = "stopped"
+ 			s.state.PositionMS = 0
+ 			s.state.Error = ""
+@@ -490,12 +518,18 @@ func (s *Server) monitor(p *nativePlayer, g uint64, out io.ReadCloser) {
+ 	natural := false
+ 	for scanner.Scan() {
+ 		var ev struct {
+-			Event      string `json:"event"`
+-			PositionMS int64  `json:"position_ms"`
++			Event      string  `json:"event"`
++			PositionMS int64   `json:"position_ms"`
++			Level      float64 `json:"level"`
+ 		}
+ 		if json.Unmarshal(scanner.Bytes(), &ev) != nil {
+ 			continue
+ 		}
++		if ev.Event == "level" {
++			ringLevel.Store(uint32(math.Max(0, math.Min(1, ev.Level)) * 1000))
++			ringLevelAt.Store(time.Now().UnixMilli())
++			continue
++		}
+ 		s.mu.Lock()
+ 		if s.player != p || s.generation != g {
+ 			s.mu.Unlock()
+@@ -666,7 +700,7 @@ func voiceAction(text string) (string, string, bool) {
+ 	if q == "поставь мои лайки" || q == "включи мои лайки" || q == "включи понравившиеся" {
+ 		return "play", "мои лайки", true
+ 	}
+-	controls := map[string]string{"дальше": "next", "следующий трек": "next", "следующая песня": "next", "назад": "previous", "предыдущий трек": "previous", "предыдущая песня": "previous", "пауза": "pause", "поставь на паузу": "pause", "продолжи": "resume", "продолжи музыку": "resume", "стоп": "stop", "выключи музыку": "stop", "выключи ютуб": "stop", "что сейчас играет": "what", "что играет": "what"}
++	controls := map[string]string{"дальше": "next", "следующий трек": "next", "следующая песня": "next", "назад": "previous", "предыдущий трек": "previous", "предыдущая песня": "previous", "пауза": "pause", "поставь на паузу": "pause", "продолжи": "resume", "продолжи музыку": "resume", "стоп": "pause", "выключи музыку": "stop", "выключи ютуб": "stop", "что сейчас играет": "what", "что играет": "what", "лайк": "like", "поставь лайк": "like", "лайкни": "like", "мне нравится": "like", "нравится": "like", "лайк этому треку": "like"}
+ 	if a, ok := controls[q]; ok {
+ 		return a, "", true
+ 	}
+@@ -739,7 +773,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
+ 			continue
+ 		}
+ 		for ctx.Err() == nil {
+-			c.SetReadDeadline(time.Now().Add(2 * time.Second))
++			// Midi: a 2 s read deadline made the listener drop and redial
++			// aliced every 2 s while idle. Block until a frame arrives.
++			c.SetReadDeadline(time.Time{})
+ 			raw, e := frameRead(c)
+ 			if e != nil {
+ 				break
+@@ -778,7 +814,11 @@ func (s *Server) voiceLoop(ctx context.Context) {
+ 			}
+ 			if a != "play" && a != "recommendations" {
+ 				v := s.snapshot()
+-				if v.Status != "playing" && v.Status != "paused" && v.Status != "buffering" && v.Status != "error" {
++				// Midi: after "стоп" keep YouTube the active source for 30 min so
++				// "продолжи" resumes our queue instead of Alice's own radio.
++				recentStop := a == "resume" && v.Status == "stopped" && len(v.Queue) > 0 &&
++					time.Since(time.Unix(lastStopUnix.Load(), 0)) < 30*time.Minute
++				if v.Status != "playing" && v.Status != "paused" && v.Status != "buffering" && v.Status != "error" && !recentStop {
+ 					continue
+ 				}
+ 				// Native Bluetooth control already calls MPRIS; a second Next
+@@ -806,6 +846,15 @@ func (s *Server) voiceLoop(ctx context.Context) {
+ 			}
+ 			last = q
+ 			lastTime = time.Now()
++			if a != "what" {
++				// Cancel Alice's own reply on the live event connection right
++				// away, before the cloud answer (subscription prompt, native
++				// radio "next") reaches the speaker.
++				c.SetWriteDeadline(time.Now().Add(time.Second))
++				if err := frameWrite(c, rpc(8, pi(1, 3))); err != nil {
++					log.Print("early cancellation not confirmed")
++				}
++			}
+ 			log.Printf("voice route: %s", a)
+ 			go func(text string) {
+ 				c, cancel := context.WithTimeout(ctx, 45*time.Second)
+@@ -855,7 +904,7 @@ func serve() error {
+ 	os.Chmod(socketPath(), 0600)
+ 	os.WriteFile(filepath.Join(runDir(), "pid"), []byte(strconv.Itoa(os.Getpid())), 0600)
+ 	defer os.Remove(filepath.Join(runDir(), "pid"))
+-	s := &Server{state: State{Version: version, Status: "stopped", Announce: true, Queue: []Track{}}, catalog: newCatalog()}
++	s := &Server{state: State{Version: version, Status: "stopped", Announce: true, Queue: []Track{}}, catalog: newCatalog(), ringFX: make(chan string, 4)}
+ 	if err := s.loadSettings(); err != nil {
+ 		return err
+ 	}
+@@ -887,6 +936,7 @@ func serve() error {
+ 	go s.mediaLoop(ctx)
+ 	go s.castLoop(ctx)
+ 	go s.indicatorLoop(ctx)
++	go s.ringLoop(ctx)
+ 	go func() {
+ 		for {
+ 			conn, err := listener.Accept()
+diff --git a/source/native/player.c b/source/native/player.c
+index d35ebd1..51705a1 100644
+--- a/source/native/player.c
++++ b/source/native/player.c
+@@ -20,6 +20,33 @@ static gboolean on_message(GstBus *bus, GstMessage *msg, gpointer unused) {
+         { GError *error = NULL; gst_message_parse_error(msg, &error, NULL);
+           if (error) {fprintf(stderr,"playback: %.300s\n",error->message);g_error_free(error);} }
+         puts("{\"event\":\"error\"}"); result = 5; running = 0; break;
++    case GST_MESSAGE_ELEMENT: {
++        /* Station Midi ring: report the loudest channel peak, 0..1 over -50..0 dB. */
++        const GstStructure *st = gst_message_get_structure(msg);
++        if (st && gst_structure_has_name(st, "level")) {
++            gchar *text = gst_structure_to_string(st);
++            const char *p = text ? strstr(text, "peak=") : NULL;
++            if (p && (p = strchr(p, '<'))) {
++                double best = -1000;
++                char *end;
++                p++;
++                for (;;) {
++                    double v = strtod(p, &end);
++                    if (end == p) break;
++                    if (v > best) best = v;
++                    p = end;
++                    while (*p == ' ' || *p == ',') p++;
++                }
++                if (best > -1000) {
++                    double x = (best + 50.0) / 50.0;
++                    if (x < 0) x = 0;
++                    if (x > 1) x = 1;
++                    printf("{\"event\":\"level\",\"level\":%.3f}\n", x);
++                }
++            }
++            g_free(text);
++        }
++    } break;
+     case GST_MESSAGE_STATE_CHANGED:
+         if (GST_MESSAGE_SRC(msg) == GST_OBJECT(play)) {
+             GstState old, now, pending;
+@@ -42,6 +69,11 @@ int main(int argc, char **argv) {
+     GError *error = NULL;
+     play = gst_parse_launch(description, &error);
+     if (!play || error) { fprintf(stderr,"pipeline: %s\n",error ? error->message : "not created"); return 3; }
++    GstElement *level = gst_element_factory_make("level", NULL);
++    if (level) {
++        g_object_set(level, "interval", (guint64)40000000, "post-messages", TRUE, NULL);
++        g_object_set(play, "audio-filter", level, NULL);
++    }
+     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(play));
+     if (!bus) {fputs("no gst bus\n",stderr);return 3;}
+     gst_bus_add_watch(bus, on_message, NULL);
+diff --git a/source/ring.go b/source/ring.go
+new file mode 100644
+index 0000000..f4a38d2
+--- /dev/null
++++ b/source/ring.go
+@@ -0,0 +1,213 @@
++package main
++
++// Station Midi LED ring (/dev/fb0, 24 pixels) driven by ytm-alice while it
++// plays: a moving animation during playback and short gestures for voice
++// controls. Alice's own animations always win: nothing is written while a
++// dialog is active, and maind redraws the ring itself.
++
++import (
++	"context"
++	"math"
++	"os"
++	"strconv"
++	"strings"
++	"sync/atomic"
++	"time"
++)
++
++const ringPixels = 24
++
++var ringLevel atomic.Uint32 // 0..1000 from the player's level events, 0 if unknown
++var ringLevelAt atomic.Int64
++
++type ringFX struct {
++	kind  string
++	start time.Time
++}
++
++func ringDevice() (string, int) {
++	if _, err := os.Stat("/dev/fb0"); err != nil {
++		return "", 0
++	}
++	raw, _ := os.ReadFile("/sys/class/graphics/fb0/virtual_size")
++	if !strings.HasPrefix(strings.TrimSpace(string(raw)), "24,") {
++		return "", 0
++	}
++	bpp := 24
++	if b, err := os.ReadFile("/sys/class/graphics/fb0/bits_per_pixel"); err == nil {
++		if n, e := strconv.Atoi(strings.TrimSpace(string(b))); e == nil && (n == 24 || n == 32) {
++			bpp = n
++		}
++	}
++	return "/dev/fb0", bpp
++}
++
++func (s *Server) ringEffect(kind string) {
++	select {
++	case s.ringFX <- kind:
++	default:
++	}
++}
++
++func hsv(h, sat, v float64) (float64, float64, float64) {
++	h = math.Mod(h, 1) * 6
++	i := math.Floor(h)
++	f := h - i
++	p, q, t := v*(1-sat), v*(1-sat*f), v*(1-sat*(1-f))
++	switch int(i) {
++	case 0:
++		return v, t, p
++	case 1:
++		return q, v, p
++	case 2:
++		return p, v, t
++	case 3:
++		return p, q, v
++	case 4:
++		return t, p, v
++	}
++	return v, p, q
++}
++
++// renderPlayback: two rotating colour comets; brightness follows the audio
++// level when the player reports it, otherwise a gentle ~120 bpm pulse.
++func renderPlayback(px *[ringPixels][3]float64, t float64) {
++	level := 0.0
++	if time.Since(time.UnixMilli(ringLevelAt.Load())) < time.Second {
++		level = float64(ringLevel.Load()) / 1000
++	} else {
++		level = 0.55 + 0.45*math.Pow(math.Abs(math.Sin(t*math.Pi*2)), 3)
++	}
++	head := math.Mod(t*6, ringPixels)
++	base := math.Mod(t*0.03, 1)
++	for i := 0; i < ringPixels; i++ {
++		v := 0.08
++		for _, h := range []float64{head, math.Mod(head+ringPixels/2, ringPixels)} {
++			d := math.Mod(h-float64(i)+ringPixels, ringPixels)
++			if d < 8 {
++				v = math.Max(v, 1-d/8)
++			}
++		}
++		r, g, b := hsv(base+float64(i)/ringPixels*0.35, 0.85, v*(0.25+0.75*level))
++		px[i] = [3]float64{r, g, b}
++	}
++}
++
++// renderFX returns false when the gesture is over.
++func renderFX(px *[ringPixels][3]float64, fx ringFX, now time.Time) bool {
++	e := now.Sub(fx.start).Seconds()
++	switch fx.kind {
++	case "next", "previous":
++		const dur = 0.45
++		if e > dur {
++			return false
++		}
++		pos := e / dur * ringPixels
++		for i := 0; i < ringPixels; i++ {
++			k := float64(i)
++			if fx.kind == "previous" {
++				k = float64(ringPixels - 1 - i)
++			}
++			d := pos - k
++			v := 0.0
++			if d >= 0 && d < 6 {
++				v = 1 - d/6
++			}
++			px[i] = [3]float64{v, v * 0.55, v * 0.15}
++		}
++	case "like":
++		const dur = 0.9
++		if e > dur {
++			return false
++		}
++		v := math.Pow(math.Sin(e/dur*2*math.Pi*2-math.Pi/2)*0.5+0.5, 2)
++		for i := range px {
++			px[i] = [3]float64{v, 0.05 * v, 0.25 * v}
++		}
++	case "pause":
++		const dur = 0.5
++		if e > dur {
++			return false
++		}
++		for i := range px {
++			px[i] = [3]float64{px[i][0] * 0.85, px[i][1] * 0.85, px[i][2] * 0.85}
++		}
++	default:
++		return false
++	}
++	return true
++}
++
++func (s *Server) ringLoop(ctx context.Context) {
++	path, bpp := ringDevice()
++	if path == "" {
++		return
++	}
++	f, err := os.OpenFile(path, os.O_WRONLY, 0)
++	if err != nil {
++		return
++	}
++	defer f.Close()
++	var px [ringPixels][3]float64
++	var cur *ringFX
++	lit := false
++	start := time.Now()
++	ticker := time.NewTicker(33 * time.Millisecond)
++	defer ticker.Stop()
++	buf := make([]byte, ringPixels*bpp/8)
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case k := <-s.ringFX:
++			cur = &ringFX{kind: k, start: time.Now()}
++			continue
++		case <-ticker.C:
++		}
++		if !s.aliceIdle.Load() {
++			// Alice is talking or listening: her animation owns the ring.
++			lit = false
++			continue
++		}
++		s.mu.Lock()
++		status := s.state.Status
++		enabled := s.settingsLocked().PlaybackLED
++		s.mu.Unlock()
++		now := time.Now()
++		active := false
++		if cur != nil {
++			if renderFX(&px, *cur, now) {
++				active = true
++			} else {
++				cur = nil
++			}
++		}
++		if !active && enabled && status == "playing" {
++			renderPlayback(&px, now.Sub(start).Seconds())
++			active = true
++		}
++		if !active {
++			if lit {
++				for i := range buf {
++					buf[i] = 0
++				}
++				f.WriteAt(buf, 0)
++				lit = false
++			}
++			continue
++		}
++		for i := 0; i < ringPixels; i++ {
++			c := [3]byte{}
++			for j := 0; j < 3; j++ {
++				c[j] = byte(math.Max(0, math.Min(1, px[i][j])) * 200)
++			}
++			if bpp == 32 {
++				buf[i*4], buf[i*4+1], buf[i*4+2], buf[i*4+3] = c[2], c[1], c[0], 0
++			} else {
++				buf[i*3], buf[i*3+1], buf[i*3+2] = c[0], c[1], c[2]
++			}
++		}
++		f.WriteAt(buf, 0)
++		lit = true
++	}
++}
+diff --git a/source/settings.go b/source/settings.go
+index 8a6088c..0b07b24 100644
+--- a/source/settings.go
++++ b/source/settings.go
+@@ -184,7 +184,7 @@ func (s *Server) settingsCommand(r request) response {
+ 		if err := validateSettings(value); err != nil {
+ 			return response{Error: err.Error()}
+ 		}
+-		if p.PlaybackLED != nil && !*p.PlaybackLED && len(playbackLEDPaths("/sys/class/leds")) == 0 {
++		if p.PlaybackLED != nil && !*p.PlaybackLED && len(playbackLEDPaths("/sys/class/leds")) == 0 && func() bool { d, _ := ringDevice(); return d == "" }() {
+ 			return response{Error: "управление подсветкой этой модели пока не поддерживается"}
+ 		}
+ 		if err := writeSettings(value); err != nil {
+diff --git a/source/web.go b/source/web.go
+index caf68fb..69eb5a2 100644
+--- a/source/web.go
++++ b/source/web.go
+@@ -188,7 +188,7 @@ func (p *webPanel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 	if !webDecode(w, r, &command) {
+ 		return
+ 	}
+-	allowed := map[string]bool{"config-get": true, "config-set": true, "recommendations": true, "shuffle-on": true, "shuffle-off": true, "status": true, "queue": true, "search": true, "liked": true, "play": true, "select": true, "jump": true, "playlists": true, "playlist": true, "next": true, "previous": true, "pause": true, "resume": true, "toggle": true, "stop": true, "announce-on": true, "announce-off": true, "auth-status": true, "auth-check": true, "auth-import": true, "auth-discover": true, "auth-accounts": true, "auth-select": true, "auth-logout": true}
++	allowed := map[string]bool{"config-get": true, "config-set": true, "recommendations": true, "shuffle-on": true, "shuffle-off": true, "status": true, "queue": true, "search": true, "liked": true, "play": true, "select": true, "jump": true, "playlists": true, "playlist": true, "next": true, "previous": true, "pause": true, "resume": true, "toggle": true, "like": true, "stop": true, "announce-on": true, "announce-off": true, "auth-status": true, "auth-check": true, "auth-import": true, "auth-discover": true, "auth-accounts": true, "auth-select": true, "auth-logout": true}
+ 	allowed["seek"] = true
+ 	if !allowed[command.Action] || len([]rune(command.Query)) > 500 {
+ 		webError(w, 400, "команда панели не поддерживается")

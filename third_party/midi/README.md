@@ -2,7 +2,7 @@
 
 ## ytm-alice (SPAWNRYS-ban/ytm-alice 0.7.4)
 
-`ytm-alice/ytm-alice` собран из 0.7.4 с патчем `voiceloop-midi.patch`
+`ytm-alice/ytm-alice` собран из 0.7.4 с патчем `ytm-alice-midi.patch`
 (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w'`):
 
 - одно постоянное подключение к aliced :9875 без 2-секундного ReadDeadline.
@@ -14,6 +14,19 @@
 - голосовое «стоп» ставит паузу (выключают «выключи музыку»/«выключи ютуб»);
 - после остановки YouTube ещё 30 минут считается активным источником:
   «продолжи» перезапускает текущий трек, а не радио Алисы.
+
+- кольцо Миди (`/dev/fb0`, 24×1 RGB): во время воспроизведения анимация,
+  яркость которой следует уровню звука; жесты на «дальше» (по часовой),
+  «назад» (против), «лайк» (розовая пульсация), пауза (затухание). Пока Алиса
+  слушает или говорит, кольцо не трогается. Выключается настройкой
+  `playback_led false`;
+- голосовой лайк: «лайк», «поставь лайк», «лайкни», «мне нравится» (нужен
+  вход в аккаунт в панели).
+
+`ytm-alice/ytm-alice-player` — armhf-плеер из `native/player.c` с элементом
+`level`: печатает `{"event":"level","level":0..1}` каждые 40 мс. Собран
+`zig cc -target arm-linux-gnueabihf.2.17` против заглушек libquasar_gstreamer/libglib
+(как `native/link-stubs.py`), заголовки glib/gstreamer 2.80/1.24.
 
 Установка: сохранить `/data/yam/bin/ytm-alice` как `ytm-alice.orig`, заменить,
 затем `ytm-alice daemon stop; YAM_ROOT=/data/yam ytm-alice daemon start`.
