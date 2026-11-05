@@ -18,6 +18,7 @@
 | `gen_effects.py` | генерирует темы для Алисы (`alice_listening/thinking/speaking`) и подсветки |
 | `ledtheme.sh` | переключатель на колонке: `ledtheme fire`, `ledtheme random`, `ledtheme lamp party` |
 | `S96ledtheme` | init-скрипт: подключает копию до старта quasar |
+| `voice_colors.py` | цвета визуализатора голоса в копии `quasar.cfg` под тему |
 | `install.sh` | установка в `/data/led-effects` (`--boot` — ещё и автозапуск) |
 
 Темы: `aurora` (сияние), `fire`, `ocean`, `rainbow`, `sakura`, `stock`.

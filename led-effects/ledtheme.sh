@@ -53,6 +53,10 @@ apply_theme() {
     reset_to_stock
     [ "$t" = stock ] || cp "$BASE/themes/$t/ring/"*.led "$ACT/ring/"
     echo "$t" > "$STATE"
+    # цвета голоса Алисы (если копия quasar.cfg подключена)
+    if grep -q " /system/vendor/quasar/quasar.cfg " /proc/mounts && [ -f "$BASE/quasar.cfg.orig" ]; then
+        /opt/bin/python3 "$BASE/voice_colors.py" "$t" || echo "ledtheme: цвета голоса не изменены" >&2
+    fi
     # лампы, выбранные раньше, сохраняем
     for f in "$BASE"/lamp.*; do
         [ -f "$f" ] || continue
