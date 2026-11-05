@@ -6,7 +6,7 @@ case "$1" in
     start)
         [ -x /data/led-effects/ledtheme ] || exit 0
         if [ -f /data/led-effects/random_on_boot ]; then
-            /data/led-effects/ledtheme random >/dev/null 2>&1
+            /data/led-effects/ledtheme --no-restart random >/dev/null 2>&1
         else
             /data/led-effects/ledtheme mount >/dev/null 2>&1
         fi ;;

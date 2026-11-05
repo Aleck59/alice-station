@@ -25,6 +25,9 @@
 `rainbow_spin`, `candle_soft`. Их запускает режим лампы Алисы: `ledtheme lamp party`
 кладёт эффект вместо лавовой лампы (`candle`, `night_light` — другие слоты).
 
+`maind` читает эффекты только при запуске (проверено 2026-11-05), поэтому
+`ledtheme` после смены темы/лампы сам делает `ledtheme restart`.
+
 ## Откат
 
 `ledtheme stock` — штатные эффекты; `ledtheme umount` или перезагрузка без

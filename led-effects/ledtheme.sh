@@ -17,6 +17,11 @@
 #   ledtheme lamp stock        вернуть штатные лампы
 #   ledtheme restart           перезапустить maind --platformd (кольцо гаснет на пару секунд)
 #
+# maind читает эффекты только при запуске, поэтому после смены темы или лампы
+# ledtheme сам перезапускает maind (кольцо гаснет на пару секунд).
+# Не чаще раза в ~10 минут (так настроен перезапуск в launch.json).
+# Флаг --no-restart: только положить файлы (например, из S96ledtheme до старта quasar).
+#
 # Подсветки лежат в $BASE/extra/ring (party, romantic, polar_lights, ...).
 
 SYS=/system/vendor/quasar/ledpatterns
@@ -85,6 +90,10 @@ restart_maind() {
     die "maind не поднялся за 15 с — перезагрузите колонку"
 }
 
+RESTART=1
+if [ "$1" = --no-restart ]; then RESTART=0; shift; fi
+maybe_restart() { [ "$RESTART" = 1 ] && restart_maind; return 0; }
+
 case "$1" in
     list)
         echo "темы:"; ls "$BASE/themes" 2>/dev/null | sed 's/^/  /'; echo "  stock"
@@ -97,16 +106,16 @@ case "$1" in
             r=$(( $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % n + 1 ))
             pick=$(ls "$BASE/themes" | sed -n "${r}p")
         done
-        apply_theme "$pick" ;;
-    stock) apply_theme stock ;;
+        apply_theme "$pick"; maybe_restart ;;
+    stock) apply_theme stock; maybe_restart ;;
     mount) do_mount; echo "подключено" ;;
     umount) is_mounted && umount "$SYS"; echo "отключено, работают штатные эффекты" ;;
     status)
         is_mounted && echo "копия подключена" || echo "копия НЕ подключена"
         echo "тема: $(cat "$STATE" 2>/dev/null || echo stock)"
         for f in "$BASE"/lamp.*; do [ -f "$f" ] && echo "лампа ${f##*/lamp.}: $(cat "$f")"; done ;;
-    lamp) shift; [ -n "$1" ] || die "ledtheme lamp <подсветка> [лампа]"; set_lamp "$@" ;;
+    lamp) shift; [ -n "$1" ] || die "ledtheme lamp <подсветка> [лампа]"; set_lamp "$@"; maybe_restart ;;
     restart) restart_maind ;;
-    ""|-h|--help) sed -n '2,22p' "$0" ;;
-    *) apply_theme "$1" ;;
+    ""|-h|--help) sed -n '2,28p' "$0" ;;
+    *) apply_theme "$1"; maybe_restart ;;
 esac
