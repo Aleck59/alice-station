@@ -153,6 +153,26 @@ index 60c6693..2b80bb7 100644
  	go func() {
  		for {
  			conn, err := listener.Accept()
+diff --git a/source/media/alice-media b/source/media/alice-media
+index a1c3557..1599570 100755
+--- a/source/media/alice-media
++++ b/source/media/alice-media
+@@ -8,9 +8,13 @@ BUS=unix:path=/tmp/btbus/socket
+ RUN=/tmp/btbus
+ HOOK=/etc/init.d/S55zbtproxy
+ ACTIVATION=/usr/share/dbus-1/system-services/org.bluez.service
+-BT="S51bluetoothd S52bluealsa S53bluealsa-aplay S54default-bluez-agent"
++# Station Midi names these S40bluetoothd, S52bluealsa, S53bluealsa-aplay,
++# S54default-bluez-agent; Lite/Mini 2 use S51bluetoothd. Discover them.
++BT=$(ls /etc/init.d 2>/dev/null | grep -E '^S[0-9]+(bluetoothd|bluealsa|bluealsa-aplay|default-bluez-agent)$' | sort | tr '\n' ' ')
++BT_REV=$(echo $BT | tr ' ' '\n' | sort -r | tr '\n' ' ')
++[ -n "$BT" ] || { echo 'Bluetooth-службы не найдены' >&2; exit 1; }
+ stop_bt() {
+-    for service in S54default-bluez-agent S53bluealsa-aplay S52bluealsa S51bluetoothd; do
++    for service in $BT_REV; do
+         /etc/init.d/$service stop
+     done
+ }
 diff --git a/source/native/player.c b/source/native/player.c
 index d35ebd1..66c5200 100644
 --- a/source/native/player.c
@@ -274,10 +294,10 @@ index d35ebd1..66c5200 100644
      gst_bus_add_watch(bus, on_message, NULL);
 diff --git a/source/ring.go b/source/ring.go
 new file mode 100644
-index 0000000..0284708
+index 0000000..44b6384
 --- /dev/null
 +++ b/source/ring.go
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,292 @@
 +package main
 +
 +// Station Midi LED ring (/dev/fb0, 24 pixels) driven by ytm-alice while it
@@ -484,7 +504,7 @@ index 0000000..0284708
 +	if path == "" {
 +		return
 +	}
-+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
++	f, err := os.OpenFile(path, os.O_RDWR, 0)
 +	if err != nil {
 +		return
 +	}
@@ -498,6 +518,9 @@ index 0000000..0284708
 +	ticker := time.NewTicker(33 * time.Millisecond)
 +	defer ticker.Stop()
 +	buf := make([]byte, ringPixels*bpp/8)
++	last := make([]byte, len(buf))
++	seen := make([]byte, len(buf))
++	var yieldUntil time.Time
 +	for {
 +		select {
 +		case <-ctx.Done():
@@ -506,6 +529,17 @@ index 0000000..0284708
 +			cur = &ringFX{kind: k, start: time.Now()}
 +			continue
 +		case <-ticker.C:
++		}
++		// If someone else (maind: Bluetooth visualiser, volume, timers) drew
++		// over our last frame, step aside for a while instead of fighting.
++		if lit {
++			if n, _ := f.ReadAt(seen, 0); n == len(seen) && string(seen) != string(last) {
++				yieldUntil = time.Now().Add(3 * time.Second)
++				lit = false
++			}
++		}
++		if time.Now().Before(yieldUntil) {
++			continue
 +		}
 +		if !s.aliceIdle.Load() {
 +			// Alice is talking or listening: her animation owns the ring.
@@ -552,6 +586,7 @@ index 0000000..0284708
 +			}
 +		}
 +		f.WriteAt(buf, 0)
++		copy(last, buf)
 +		lit = true
 +	}
 +}

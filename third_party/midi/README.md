@@ -44,3 +44,14 @@
 
 `stop.sh` должен дополнительно удалять `ZAPRET2Q`:
 `iptables -t mangle -F ZAPRET2Q; iptables -t mangle -X ZAPRET2Q`.
+
+## Медиаслой (alice-media) на Миди
+
+`ytm-alice/alice-media` — скрипт медиаслоя 0.7.4, где список Bluetooth-служб
+находится автоматически (`S40bluetoothd`, `S52bluealsa`, `S53bluealsa-aplay`,
+`S54default-bluez-agent` на Миди) вместо зашитых `S51…S54`. Ставится вместо
+`/data/yam/bin/alice-media`, затем `ytm-alice daemon install`. Откат:
+`alice-media uninstall` и перезагрузка.
+
+Кольцо ytm-alice уступает, если в `/dev/fb0` кто-то перерисовал кадр
+(например, визуализатор Алисы для Bluetooth), и ждёт 3 с.
