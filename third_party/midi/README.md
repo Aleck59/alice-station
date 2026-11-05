@@ -23,7 +23,8 @@
 - голосовой лайк: «лайк», «поставь лайк», «лайкни», «мне нравится» (нужен
   вход в аккаунт в панели).
 
-`ytm-alice/ytm-alice-player` — armhf-плеер из `native/player.c` с элементом
+`ytm-alice/ytm-alice-player` — armhf-плеер из `native/player.c` с элементом `level` или (на Миди, где его нет) `spectrum` по басовым полосам;
+все новые функции прошивки берутся через dlsym, без них плеер просто играет без уровня. Элемент
 `level`: печатает `{"event":"level","level":0..1}` каждые 40 мс. Собран
 `zig cc -target arm-linux-gnueabihf.2.17` против заглушек libquasar_gstreamer/libglib
 (как `native/link-stubs.py`), заголовки glib/gstreamer 2.80/1.24.

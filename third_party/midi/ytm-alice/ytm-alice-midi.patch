@@ -146,50 +146,89 @@ index 60c6693..58512d9 100644
  		for {
  			conn, err := listener.Accept()
 diff --git a/source/native/player.c b/source/native/player.c
-index d35ebd1..51705a1 100644
+index d35ebd1..266d754 100644
 --- a/source/native/player.c
 +++ b/source/native/player.c
-@@ -20,6 +20,33 @@ static gboolean on_message(GstBus *bus, GstMessage *msg, gpointer unused) {
+@@ -4,6 +4,15 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <sys/select.h>
++#include <dlfcn.h>
++
++/* Optional firmware symbols for the level meter; resolved at runtime so the
++ * player still starts on firmware that does not export them. */
++static const GstStructure *(*p_msg_structure)(GstMessage *);
++static const gchar *(*p_structure_name)(const GstStructure *);
++static gchar *(*p_structure_to_string)(const GstStructure *);
++static void (*p_free)(gpointer);
++static int spectrum_mode;
+ 
+ #define PLUGINS(X) X(coreelements) X(playback) X(typefindfunctions) X(audioconvert) X(audioresample) X(alsa_nocapturelog) X(volume) X(audioparsers) X(isomp4) X(libav) X(soup) X(gio) X(audiofx)
+ #define DECLARE_PLUGIN(name) GST_PLUGIN_STATIC_DECLARE(name);
+@@ -20,6 +29,37 @@ static gboolean on_message(GstBus *bus, GstMessage *msg, gpointer unused) {
          { GError *error = NULL; gst_message_parse_error(msg, &error, NULL);
            if (error) {fprintf(stderr,"playback: %.300s\n",error->message);g_error_free(error);} }
          puts("{\"event\":\"error\"}"); result = 5; running = 0; break;
 +    case GST_MESSAGE_ELEMENT: {
 +        /* Station Midi ring: report the loudest channel peak, 0..1 over -50..0 dB. */
-+        const GstStructure *st = gst_message_get_structure(msg);
-+        if (st && gst_structure_has_name(st, "level")) {
-+            gchar *text = gst_structure_to_string(st);
-+            const char *p = text ? strstr(text, "peak=") : NULL;
-+            if (p && (p = strchr(p, '<'))) {
++        const GstStructure *st = p_msg_structure ? p_msg_structure(msg) : NULL;
++        const gchar *sname = st ? p_structure_name(st) : NULL;
++        if (sname && (!strcmp(sname, "level") || !strcmp(sname, "spectrum"))) {
++            gchar *text = p_structure_to_string(st);
++            const char *p = text ? strstr(text, sname[0] == 'l' ? "peak=" : "magnitude=") : NULL;
++            if (p) p = strpbrk(p, "<{");
++            if (p) {
 +                double best = -1000;
 +                char *end;
++                int n = 0, limit = sname[0] == 's' ? 3 : 64;
 +                p++;
-+                for (;;) {
++                while (n++ < limit) {
 +                    double v = strtod(p, &end);
 +                    if (end == p) break;
 +                    if (v > best) best = v;
 +                    p = end;
 +                    while (*p == ' ' || *p == ',') p++;
++                    if (*p == '}' || *p == '>') break;
 +                }
 +                if (best > -1000) {
-+                    double x = (best + 50.0) / 50.0;
++                    double x = sname[0] == 's' ? (best + 60.0) / 45.0 : (best + 50.0) / 50.0;
 +                    if (x < 0) x = 0;
 +                    if (x > 1) x = 1;
 +                    printf("{\"event\":\"level\",\"level\":%.3f}\n", x);
 +                }
 +            }
-+            g_free(text);
++            if (text) p_free(text);
 +        }
 +    } break;
      case GST_MESSAGE_STATE_CHANGED:
          if (GST_MESSAGE_SRC(msg) == GST_OBJECT(play)) {
              GstState old, now, pending;
-@@ -42,6 +69,11 @@ int main(int argc, char **argv) {
+@@ -42,6 +82,30 @@ int main(int argc, char **argv) {
      GError *error = NULL;
      play = gst_parse_launch(description, &error);
      if (!play || error) { fprintf(stderr,"pipeline: %s\n",error ? error->message : "not created"); return 3; }
-+    GstElement *level = gst_element_factory_make("level", NULL);
++    p_msg_structure = dlsym(RTLD_DEFAULT, "gst_message_get_structure");
++    p_structure_name = dlsym(RTLD_DEFAULT, "gst_structure_get_name");
++    p_structure_to_string = dlsym(RTLD_DEFAULT, "gst_structure_to_string");
++    p_free = dlsym(RTLD_DEFAULT, "g_free");
++    if (!p_free) p_free = free;
++    GstElement *level = NULL;
++    if (p_msg_structure && p_structure_name && p_structure_to_string) {
++        GError *lerr = NULL;
++        level = gst_parse_launch("level", &lerr);
++        if (lerr) { g_error_free(lerr); lerr = NULL; if (level) gst_object_unref(level); level = NULL; }
++        if (!level) {
++            /* Midi firmware: no level plugin, but spectrum is built in. Bass
++             * bands only, so the ring follows the beat. */
++            gboolean (*reg)(void) = (gboolean (*)(void))dlsym(RTLD_DEFAULT, "gst_plugin_spectrum_register");
++            if (reg) reg();
++            level = gst_parse_launch("spectrum bands=16 threshold=-60 interval=40000000 post-messages=true message-magnitude=true", &lerr);
++            if (lerr) { g_error_free(lerr); if (level) gst_object_unref(level); level = NULL; }
++            if (level) spectrum_mode = 1;
++        }
++    }
 +    if (level) {
-+        g_object_set(level, "interval", (guint64)40000000, "post-messages", TRUE, NULL);
++        if (!spectrum_mode) g_object_set(level, "interval", (guint64)40000000, "post-messages", TRUE, NULL);
 +        g_object_set(play, "audio-filter", level, NULL);
 +    }
      GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(play));
