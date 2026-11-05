@@ -1,5 +1,5 @@
 diff --git a/source/main.go b/source/main.go
-index 60c6693..5211d6a 100644
+index 60c6693..697f9be 100644
 --- a/source/main.go
 +++ b/source/main.go
 @@ -45,6 +45,9 @@ func dataDir() string {
@@ -20,6 +20,15 @@ index 60c6693..5211d6a 100644
  			s.state.Status = "stopped"
  			s.state.PositionMS = 0
  			s.state.Error = ""
+@@ -666,7 +670,7 @@ func voiceAction(text string) (string, string, bool) {
+ 	if q == "поставь мои лайки" || q == "включи мои лайки" || q == "включи понравившиеся" {
+ 		return "play", "мои лайки", true
+ 	}
+-	controls := map[string]string{"дальше": "next", "следующий трек": "next", "следующая песня": "next", "назад": "previous", "предыдущий трек": "previous", "предыдущая песня": "previous", "пауза": "pause", "поставь на паузу": "pause", "продолжи": "resume", "продолжи музыку": "resume", "стоп": "stop", "выключи музыку": "stop", "выключи ютуб": "stop", "что сейчас играет": "what", "что играет": "what"}
++	controls := map[string]string{"дальше": "next", "следующий трек": "next", "следующая песня": "next", "назад": "previous", "предыдущий трек": "previous", "предыдущая песня": "previous", "пауза": "pause", "поставь на паузу": "pause", "продолжи": "resume", "продолжи музыку": "resume", "стоп": "pause", "выключи музыку": "stop", "выключи ютуб": "stop", "что сейчас играет": "what", "что играет": "what"}
+ 	if a, ok := controls[q]; ok {
+ 		return a, "", true
+ 	}
 @@ -739,7 +743,9 @@ func (s *Server) voiceLoop(ctx context.Context) {
  			continue
  		}
