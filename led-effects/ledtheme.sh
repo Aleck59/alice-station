@@ -108,7 +108,13 @@ ringproxy() {
         on)
             proxy_running && { echo "ringproxy уже работает"; return 0; }
             [ -f "$BASE/palette.json" ] || echo "ledtheme: нет palette.json — сначала выберите тему" >&2
-            nohup /opt/bin/python3 "$BASE/ringproxy.py" >/data/led-effects/ringproxy.log 2>&1 &
+            # setsid: служба не должна умереть вместе с adb-сессией
+            # (иначе кольцо застынет с trigger=none)
+            if command -v setsid >/dev/null 2>&1; then
+                setsid /opt/bin/python3 "$BASE/ringproxy.py" </dev/null >"$BASE/ringproxy.log" 2>&1 &
+            else
+                nohup /opt/bin/python3 "$BASE/ringproxy.py" </dev/null >"$BASE/ringproxy.log" 2>&1 &
+            fi
             echo $! > "$PROXY_PID"
             touch "$BASE/ringproxy_on"
             echo "ringproxy включён" ;;
