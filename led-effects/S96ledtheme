@@ -1,0 +1,15 @@
+#!/bin/sh
+# Подключает копию эффектов кольца (/data/ledpatterns) поверх штатной папки
+# до старта quasar (S97quasar). Удалить этот файл — вернуть штатные эффекты.
+# Если есть /data/led-effects/random_on_boot — при каждой загрузке случайная тема.
+case "$1" in
+    start)
+        [ -x /data/led-effects/ledtheme ] || exit 0
+        if [ -f /data/led-effects/random_on_boot ]; then
+            /data/led-effects/ledtheme random >/dev/null 2>&1
+        else
+            /data/led-effects/ledtheme mount >/dev/null 2>&1
+        fi ;;
+    stop) umount /system/vendor/quasar/ledpatterns 2>/dev/null ;;
+esac
+exit 0

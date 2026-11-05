@@ -8,3 +8,4 @@ __pycache__/
 config.local.toml
 devices.json
 *.img
+led-effects/build/
