@@ -5,7 +5,9 @@
 24 цвета RRGGBB через пробел и длительность кадра в мс. Строка `loop`
 отмечает начало повторяющейся части; кадры выше неё играют один раз.
 
-Запуск:  python3 gen_effects.py [папка_вывода]   (по умолчанию ./build)
+Запуск:  python3 gen_effects.py [папка_вывода [папка_штатных_ring]]
+         (по умолчанию ./build; со второй папкой ещё и перекрашивает штатные
+         intonation_spotting / alice_listening_out под каждую тему)
 Результат: build/themes/<тема>/ring/<имя>.led — темы для состояний Алисы
 и build/extra/ring/<имя>.led — отдельные эффекты-подсветки.
 Только стандартная библиотека, работает и на колонке (/opt/bin/python3).
@@ -267,6 +269,37 @@ EXTRA = {
 }
 
 
+# --- перекраска штатных анимаций под тему -------------------------------
+# Пробуждение (intonation_spotting) и затухание (alice_listening_out) берём из
+# штатных файлов и перекрашиваем: яркость каждого светодиода сохраняется,
+# оттенок берётся из темы. Так тайминги остаются родными.
+RECOLOR = ("intonation_spotting", "alice_listening_out", "alice_listening")
+
+TINT = {
+    "aurora": grad(HEX("00ffa0"), HEX("6a00ff"), 100),
+    "fire": grad(HEX("ff3000"), HEX("ffa000"), 100),
+    "ocean": grad(HEX("0030ff"), HEX("00d0ff"), 100),
+    "rainbow": rainbow(100),
+    "sakura": grad(HEX("ff3080"), HEX("ffc0e0"), 100),
+}
+
+
+def recolor(text: str, color_at) -> str:
+    out, f = [], 0
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != N + 1:
+            out.append(line)  # loop, smooth 1, no_size_optimization ...
+            continue
+        frame = []
+        for i, h in enumerate(parts[:N]):
+            k = max(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)) / 255
+            frame.append(hexc(scale(color_at(i, f), k)))
+        out.append(" ".join(frame) + " " + parts[N])
+        f += 1
+    return "\n".join(out) + "\n"
+
+
 def write(out: str, group: str, name: str, p: Pattern) -> None:
     d = os.path.join(out, group, "ring")
     os.makedirs(d, exist_ok=True)
@@ -281,6 +314,19 @@ def main() -> None:
             write(out, os.path.join("themes", t), name, p)
     for name, p in EXTRA.items():
         write(out, "extra", name, p)
+    stock = sys.argv[2] if len(sys.argv) > 2 else ""
+    if stock:
+        for name in RECOLOR:
+            src = os.path.join(stock, name + ".led")
+            if not os.path.isfile(src):
+                continue
+            with open(src) as fh:
+                text = fh.read()
+            for t, fn in TINT.items():
+                if name == "alice_listening":
+                    continue  # у тем своя анимация слушания
+                with open(os.path.join(out, "themes", t, "ring", name + ".led"), "w", newline="\n") as fh:
+                    fh.write(recolor(text, fn))
     print("готово:", out)
 
 
