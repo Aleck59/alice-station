@@ -1,0 +1,101 @@
+{
+  "listen": "127.0.0.1:8443",
+  "upstream": "wss://uniproxy.alice.yandex.net/uni.ws",
+  "mode": "observe",
+  "listen_after_reply": true,
+  "tls_cert": "",
+  "tls_key": "",
+  "allowed_ips": ["127.0.0.1", "::1"],
+  "llm_base_url": "https://api.mistral.ai/v1",
+  "llm_model": "mistral-small-latest",
+  "llm_api": "chat_completions",
+  "llm_chat_parameters": {
+    "chat_template_kwargs": null
+  },
+  "llm_strip_prefixes": [
+    "спроси у нейросети",
+    "спроси нейросеть",
+    "спроси у своей модели",
+    "спроси свою модель",
+    "спроси модель"
+  ],
+  "llm_reasoning_effort": "",
+  "llm_max_output_tokens": 1024,
+  "llm_hosted_tools": [],
+  "home_warm_area": "",
+  "routing": {
+    "rules": [
+      {
+        "name": "speaker_playback",
+        "route": "yandex",
+        "match": {
+          "regex": "^\\s*(?:алиса[,\\s]+)?(?:пожалуйста[,\\s]+)?(?:хватит|стоп|пауза|останови(?:те)?|(?:останови(?:те)?|выключи(?:те)?|прекрати(?:те)?) (?:музыку|воспроизведение|песню|песни|трек|радио)|поставь(?:те)? на паузу|(?:продолжи(?:те)?|возобнови(?:те)?) (?:музыку|воспроизведение|песню|трек))[,\\s]*(?:пожалуйста)?[.!?]*\\s*$"
+        }
+      },
+      {
+        "name": "ask_model",
+        "route": "llm",
+        "match": {
+          "contains_any": [
+            "спроси у нейросети",
+            "спроси нейросеть",
+            "спроси у своей модели",
+            "спроси свою модель",
+            "спроси модель"
+          ]
+        }
+      }
+    ],
+    "default_route": "yandex",
+    "refusal": {
+      "enabled": true,
+      "prefixes": [
+        "не могу", "я не могу", "я не буду", "не буду",
+        "не поняла", "я не поняла", "не понял", "я не понял",
+        "извините", "простите", "к сожалению",
+        "не знаю", "я не знаю", "я пока не умею", "пока не умею", "увы"
+      ],
+      "contains_any": [
+        "не могу помочь", "не могу обсуждать", "не могу выполнить",
+        "не могу понять", "не могу ответить", "не буду отвечать",
+        "не поняла", "не понял", "не понимаю", "не удалось понять",
+        "не знаю", "не умею", "не отвечу"
+      ]
+    }
+  },
+  "conversation_log": {
+    "enabled": false,
+    "path": "conversations.jsonl",
+    "max_size_mb": 1,
+    "max_backups": 2,
+    "max_text_chars": 8000
+  },
+  "assistant_tools": {
+    "enabled": true,
+    "web": true,
+    "history": false,
+    "time": true,
+    "play_sound": false,
+    "updates": false,
+    "configuration": false,
+    "timezone": "Europe/Moscow",
+    "max_rounds": 3,
+    "max_calls": 4,
+    "web_timeout_ms": 8000,
+    "web_max_bytes": 1048576,
+    "web_max_chars": 12000,
+    "history_max_scan_mb": 16,
+    "mcp_servers": []
+  },
+  "local_progress": {
+    "enabled": true,
+    "after_ms": 2000,
+    "interval_ms": 4000
+  },
+  "dialogue_context": {
+    "enabled": true,
+    "ttl_seconds": 300,
+    "max_turns": 6,
+    "max_chars": 12000
+  }
+}
