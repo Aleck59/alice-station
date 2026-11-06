@@ -39,3 +39,16 @@ Anthropic.
 4. `mode: hybrid`, `control.sh restart`, проверка голосом и задержки.
 
 Откат: `control.sh rollback`, перезагрузка, затем `uninstall.sh`.
+
+## Сторож: возврат к Алисе, если модель недоступна
+
+`llm-watchdog.sh` каждые 15 с проверяет `api.mistral.ai/v1/models` с ключом из
+`runtime.env` и `127.0.0.1:8443/healthz`:
+
+- Mistral не отвечает 60 с → `mode: observe` + `control.sh restart`: все запросы
+  снова обслуживает Алиса. Модель вернулась → `mode: hybrid`.
+- мост не отвечает 60 с → `control.sh restart`.
+
+Установка: `llm-watchdog.sh` в `/data/opt/quasar-bridge/`, `S97zllm-watchdog`
+в `/etc/init.d/`. Журнал — `/data/opt/quasar-bridge/llm-watchdog.log`.
+Режим задаётся только в `config.json` (в `runtime.env` не должно быть `QUASAR_MODE`).
