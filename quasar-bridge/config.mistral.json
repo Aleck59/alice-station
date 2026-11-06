@@ -7,7 +7,7 @@
   "tls_key": "",
   "allowed_ips": ["127.0.0.1", "::1"],
   "llm_base_url": "https://api.mistral.ai/v1",
-  "llm_model": "mistral-small-latest",
+  "llm_model": "ministral-14b-latest",
   "llm_api": "chat_completions",
   "llm_chat_parameters": {
     "chat_template_kwargs": null
