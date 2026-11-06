@@ -42,7 +42,7 @@ Anthropic.
 
 ## Сторож: возврат к Алисе, если модель недоступна
 
-`llm-watchdog.sh` каждые 15 с проверяет `api.mistral.ai/v1/models` с ключом из
+`llm-watchdog.sh` каждые 30 с шлёт модели запрос на 1 токен (`/v1/chat/completions`; `/v1/models` отвечает 200 даже при нулевой квоте) с ключом из
 `runtime.env` и `127.0.0.1:8443/healthz`:
 
 - Mistral не отвечает 60 с → `mode: observe` + `control.sh restart`: все запросы
