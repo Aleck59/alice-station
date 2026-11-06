@@ -28,7 +28,7 @@ FB = "/dev/fb0"
 LEDS = "/sys/class/leds"
 PALETTE = "/data/led-effects/palette.json"
 TRIGGER = "ledfb-ring"
-FPS = 30
+FPS = 50
 CH = ("red", "green", "blue")
 
 
@@ -106,14 +106,15 @@ def main() -> None:
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
                 vals = recolor(frame, pal)
-                # Контроллер AW21036, похоже, применяет значение только при
-                # следующих записях, поэтому при любом изменении кадра
-                # переписываем все 72 канала (~10 мс), и раз в секунду — тоже.
-                if vals != last or t0 - full_at > 1:
+                # Пишем только изменившиеся каналы (быстро, без задержки кадра),
+                # а раз в 0,5 с — все 72, на случай если контроллер что-то не применил.
+                full = t0 - full_at > 0.5
+                if full:
                     full_at = t0
-                    for j, v in enumerate(vals):
+                for j, v in enumerate(vals):
+                    if full or not last or v != last[j]:
                         os.pwrite(fds[j // 3][j % 3], str(v).encode(), 0)
-                    last = vals
+                last = vals
             dt = period - (time.monotonic() - t0)
             if dt > 0:
                 time.sleep(dt)

@@ -134,7 +134,7 @@ def speak(color_at, frames: int, seed: int) -> Pattern:
 # --- темы для состояний Алисы ------------------------------------------
 
 def theme(colors_listen, colors_think, colors_speak, seed: int) -> dict[str, Pattern]:
-    listen = breathe(colors_listen, 100, lo=0.55)
+    listen = breathe(colors_listen, 75, lo=0.55)  # ~1,5 с, как у штатной
     fill_intro(listen, colors_listen)
     think = comet(colors_think, 60, tail=10, heads=2, base=0.05)
     sp = speak(colors_speak, 160, seed)
@@ -273,7 +273,17 @@ EXTRA = {
 # Пробуждение (intonation_spotting) и затухание (alice_listening_out) берём из
 # штатных файлов и перекрашиваем: яркость каждого светодиода сохраняется,
 # оттенок берётся из темы. Так тайминги остаются родными.
-RECOLOR = ("intonation_spotting", "alice_listening_out", "alice_listening")
+RECOLOR = ("intonation_spotting", "alice_listening_out", "alice_listening",
+           "bluetooth_connected", "bluetooth_disconnected", "bluetooth_pairing",
+           "bluetooth_playing", "player_continue", "player_next_track",
+           "player_pause", "player_previous_track")
+
+
+def bt_playing_loop(color_at) -> str:
+    """Штатный bluetooth_playing — вспышка и застывшее синее кольцо.
+    У нас после вступления — медленная волна цветов темы, пока играет Bluetooth."""
+    p = wave(color_at, 150, waves=1, lo=0.6)
+    return "loop\n" + "\n".join(p.loop) + "\n"
 
 TINT = {
     "aurora": grad(HEX("00ffa0"), HEX("6a00ff"), 100),
@@ -338,8 +348,11 @@ def main() -> None:
             for t, fn in TINT.items():
                 if name == "alice_listening":
                     continue  # у тем своя анимация слушания
+                body = recolor(text, fn)
+                if name == "bluetooth_playing" and "loop" not in text.split():
+                    body += bt_playing_loop(fn)
                 with open(os.path.join(out, "themes", t, "ring", name + ".led"), "w", newline="\n") as fh:
-                    fh.write(recolor(text, fn))
+                    fh.write(body)
     print("готово:", out)
 
 
