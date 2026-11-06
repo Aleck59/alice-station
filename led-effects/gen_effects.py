@@ -349,8 +349,13 @@ def main() -> None:
                 if name == "alice_listening":
                     continue  # у тем своя анимация слушания
                 body = recolor(text, fn)
-                if name == "bluetooth_playing" and "loop" not in text.split():
-                    body += bt_playing_loop(fn)
+                if name == "bluetooth_playing":
+                    # штатный: вступление, затем `loop` и один застывший кадр —
+                    # застывшую часть заменяем волной цветов темы
+                    lines = body.splitlines()
+                    if "loop" in lines:
+                        lines = lines[:lines.index("loop")]
+                    body = "\n".join(lines) + "\n" + bt_playing_loop(fn)
                 with open(os.path.join(out, "themes", t, "ring", name + ".led"), "w", newline="\n") as fh:
                     fh.write(body)
     print("готово:", out)
