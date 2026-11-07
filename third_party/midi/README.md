@@ -1,8 +1,8 @@
 # Доработки сторонних пакетов под Станцию Миди
 
-## ytm-alice (SPAWNRYS-ban/ytm-alice 0.7.4)
+## ytm-alice (SPAWNRYS-ban/ytm-alice 0.7.5)
 
-`ytm-alice/ytm-alice` собран из 0.7.4 с патчем `ytm-alice-midi.patch`
+`ytm-alice/ytm-alice` собран из 0.7.5 (255d182) с патчем `ytm-alice-midi.patch`
 (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w'`):
 
 - одно постоянное подключение к aliced :9875 без 2-секундного ReadDeadline.
@@ -22,7 +22,7 @@
 - голосовой лайк: «лайк», «поставь лайк», «лайкни», «мне нравится» (нужен
   вход в аккаунт в панели).
 
-Плеер — штатный из пакета 0.7.4. Своей подсветки ytm-alice не рисует:
+Плеер, резолвер и bt-proxy — штатные из пакета 0.7.4: в 0.7.5 они не менялись. Своей подсветки ytm-alice не рисует:
 кольцо полностью за Алисой (через медиаслой она видит YouTube как Bluetooth).
 
 Установка: сохранить `/data/yam/bin/ytm-alice` как `ytm-alice.orig`, заменить,
@@ -42,7 +42,7 @@
 
 ## Медиаслой (alice-media) на Миди
 
-`ytm-alice/alice-media` — скрипт медиаслоя 0.7.4, где список Bluetooth-служб
+`ytm-alice/alice-media` — скрипт медиаслоя 0.7.5 (не менялся с 0.7.4), где список Bluetooth-служб
 находится автоматически (`S40bluetoothd`, `S52bluealsa`, `S53bluealsa-aplay`,
 `S54default-bluez-agent` на Миди) вместо зашитых `S51…S54`. Ставится вместо
 `/data/yam/bin/alice-media`, затем `ytm-alice daemon install`. Откат:
