@@ -1,0 +1,86 @@
+diff --git a/internal/llm/client.go b/internal/llm/client.go
+index 15a05f2..dedc6c3 100644
+--- a/internal/llm/client.go
++++ b/internal/llm/client.go
+@@ -156,7 +156,13 @@ func (c *Client) chatCompletions(ctx context.Context, messages []Message, struct
+ 		} `json:"choices"`
+ 	}
+ 	if err := json.Unmarshal(data, &result); err != nil {
+-		return Message{}, errors.New("invalid LLM response")
++		data, err = flattenContentChunks(data)
++		if err != nil {
++			return Message{}, errors.New("invalid LLM response")
++		}
++		if err := json.Unmarshal(data, &result); err != nil {
++			return Message{}, errors.New("invalid LLM response")
++		}
+ 	}
+ 	if len(result.Choices) == 0 || (strings.TrimSpace(result.Choices[0].Message.Content) == "" && len(result.Choices[0].Message.ToolCalls) == 0) {
+ 		return Message{}, errors.New("LLM returned no answer")
+@@ -251,3 +257,34 @@ func (c *Client) post(ctx context.Context, path string, request any) ([]byte, er
+ 	}
+ 	return data, nil
+ }
++
++// flattenContentChunks rewrites choices[].message.content given as an array of
++// typed chunks (Mistral reasoning models: [{"type":"thinking",...},
++// {"type":"text","text":"..."}]) into a plain string of the "text" chunks.
++// Reasoning chunks are dropped: they must never be spoken.
++func flattenContentChunks(data []byte) ([]byte, error) {
++	var raw map[string]any
++	if err := json.Unmarshal(data, &raw); err != nil {
++		return nil, err
++	}
++	choices, _ := raw["choices"].([]any)
++	for _, ch := range choices {
++		choice, _ := ch.(map[string]any)
++		msg, _ := choice["message"].(map[string]any)
++		parts, ok := msg["content"].([]any)
++		if !ok {
++			continue
++		}
++		var b strings.Builder
++		for _, p := range parts {
++			part, _ := p.(map[string]any)
++			if part["type"] == "text" {
++				if t, ok := part["text"].(string); ok {
++					b.WriteString(t)
++				}
++			}
++		}
++		msg["content"] = b.String()
++	}
++	return json.Marshal(raw)
++}
+diff --git a/internal/llm/content_chunks_test.go b/internal/llm/content_chunks_test.go
+new file mode 100644
+index 0000000..2f07e3d
+--- /dev/null
++++ b/internal/llm/content_chunks_test.go
+@@ -0,0 +1,26 @@
++package llm
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestChatCompletionsFlattensMistralChunks(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		w.Write([]byte(`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[` +
++			`{"type":"thinking","thinking":[{"type":"text","text":"Маша тоже сестра"}]},` +
++			`{"type":"text","text":"У брата "},{"type":"text","text":"4 сестры."}]}}]}`))
++	}))
++	defer srv.Close()
++	c := &Client{BaseURL: srv.URL, Model: "m", HTTP: srv.Client()}
++	got, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "?"}}, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got != "У брата 4 сестры." {
++		t.Fatalf("got %q", got)
++	}
++}

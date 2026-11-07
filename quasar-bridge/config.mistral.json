@@ -10,10 +10,11 @@
     "::1"
   ],
   "llm_base_url": "https://api.mistral.ai/v1",
-  "llm_model": "ministral-14b-latest",
+  "llm_model": "mistral-large-4",
   "llm_api": "chat_completions",
   "llm_chat_parameters": {
-    "chat_template_kwargs": null
+    "chat_template_kwargs": null,
+    "reasoning_effort": "low"
   },
   "llm_strip_prefixes": [
     "спроси у нейросети",

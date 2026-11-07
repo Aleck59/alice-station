@@ -56,3 +56,16 @@ Anthropic.
 Установка: `llm-watchdog.sh` в `/data/opt/quasar-bridge/`, `S97zllm-watchdog`
 в `/etc/init.d/`. Журнал — `/data/opt/quasar-bridge/llm-watchdog.log`.
 Режим задаётся только в `config.json` (в `runtime.env` не должно быть `QUASAR_MODE`).
+
+## mistral-large-4 (2026-11-07)
+
+На тарифе Free доступна `mistral-large-4` (именно это имя; `mistral-large-latest` → 403),
+50 запросов в минуту, ~2,5 с. Это модель с рассуждением: `reasoning_effort` бывает
+только `low|medium|high`, а `content` приходит массивом чанков `thinking` + `text`.
+Мост v0.7.4 ждёт строку и падает с «invalid LLM response», поэтому
+`mistral-content-chunks.patch` (поверх тега v0.7.4) склеивает чанки `text` и
+отбрасывает `thinking`. Сборка: `bin/quasar-bridge-arm64` (Go 1.27.3,
+`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '-s -w -X
+quasarbridge/internal/update.Version=0.7.4' ./cmd/quasar-bridge`), SHA-256 в `bin/SHA256SUMS`.
+На колонке заменяет `/data/opt/quasar-bridge/app/bin/quasar-bridge` (оригинал `.orig`).
+Внимание: встроенное обновление моста вернёт штатный бинарник.
