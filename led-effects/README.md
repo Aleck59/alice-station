@@ -43,6 +43,13 @@
 (`/data/led-effects/palette.json`) и пишет в `/sys/class/leds/cucumber:*:ringN`.
 `ledtheme ringproxy off` (или перезагрузка без автозапуска) возвращает триггер.
 
+### Цвет по тому, кто отвечает
+
+Если файл `/var/run/alice-route` моложе 45 с и содержит `alice` (ответ ушёл
+штатной Алисе, fallback моста), ringproxy не перекрашивает кольцо — цвет
+штатный. `assistant`, старый файл или его отсутствие — цвета темы. Файл пишет
+Quasar Bridge в начале каждого ответа.
+
 ## Откат
 
 `ledtheme stock` — штатные эффекты; `ledtheme umount` или перезагрузка без

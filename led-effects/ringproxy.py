@@ -28,6 +28,11 @@ FB = "/dev/fb0"
 LEDS = "/sys/class/leds"
 PALETTE = "/data/led-effects/palette.json"
 TRIGGER = "ledfb-ring"
+# Кто отвечает: мост (Quasar Bridge) пишет сюда "assistant" или "alice"
+# в начале каждого ответа. Если отвечает штатная Алиса (fallback) — кольцо
+# остаётся штатного цвета, пока файл свежий (ROUTE_TTL секунд).
+ROUTE = "/var/run/alice-route"
+ROUTE_TTL = 45
 FPS = 50
 CH = ("red", "green", "blue")
 
@@ -103,9 +108,17 @@ def main() -> None:
                     m = -1
                 if m != pal_mtime:
                     pal_mtime, pal = m, load_palette(PALETTE)
+            stock_now = False
+            try:
+                st = os.stat(ROUTE)
+                if time.time() - st.st_mtime < ROUTE_TTL:
+                    with open(ROUTE) as fh:
+                        stock_now = fh.read(16).strip() == "alice"
+            except OSError:
+                pass
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
-                vals = recolor(frame, pal)
+                vals = recolor(frame, None if stock_now else pal)
                 # Пишем только изменившиеся каналы (быстро, без задержки кадра),
                 # а раз в 0,5 с — все 72, на случай если контроллер что-то не применил.
                 full = t0 - full_at > 0.5
