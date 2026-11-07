@@ -29,10 +29,49 @@ LEDS = "/sys/class/leds"
 PALETTE = "/data/led-effects/palette.json"
 TRIGGER = "ledfb-ring"
 # Кто отвечает: мост (Quasar Bridge) пишет сюда "assistant" или "alice"
-# в начале каждого ответа. Если отвечает штатная Алиса (fallback) — кольцо
-# остаётся штатного цвета, пока файл свежий (ROUTE_TTL секунд).
-ROUTE = "/var/run/alice-route"
+# на каждом решении маршрута (сторож в режиме observe пишет "alice").
+# Кольцо РЕЧИ красится в тему только при свежем (< ROUTE_TTL с) "assistant",
+# иначе остаётся штатным. Музыкальный эквалайзер и прочее — всегда в теме.
+ROUTE = os.environ.get("QUASAR_ROUTE_FILE", "/var/run/alice-route")
 ROUTE_TTL = 45
+# Что сейчас рисует maind (речь или музыка) — по его журналу:
+# "Creating spectrogram: pulsing_voice" — речь, "...: ball/disco/..." — музыка.
+MAIND_LOG = "/data/quasar/daemons_logs/maind.log"
+
+
+class LogTail:
+    """Дочитывает новые строки журнала maind, переживает ротацию."""
+
+    def __init__(self, path: str) -> None:
+        self.path, self.fh, self.ino, self.buf = path, None, None, b""
+
+    def lines(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return []
+        if self.fh is None or st.st_ino != self.ino or st.st_size < self.fh.tell():
+            if self.fh:
+                self.fh.close()
+            self.fh, self.ino = open(self.path, "rb"), st.st_ino
+            self.fh.seek(0, os.SEEK_END)
+            return []
+        data = self.fh.read(65536)
+        if not data:
+            return []
+        self.buf += data
+        *done, self.buf = self.buf.split(b"\n")
+        return done
+
+
+def assistant_route() -> bool:
+    try:
+        if time.time() - os.stat(ROUTE).st_mtime >= ROUTE_TTL:
+            return False
+        with open(ROUTE) as fh:
+            return fh.read(16).strip() == "assistant"
+    except OSError:
+        return False
 FPS = 50
 CH = ("red", "green", "blue")
 
@@ -95,6 +134,7 @@ def main() -> None:
     pal, pal_mtime, pal_check = None, 0.0, 0.0
     last: list[int] = []
     full_at = 0.0
+    log, voice = LogTail(MAIND_LOG), False
     set_triggers("none")
     try:
         period = 1.0 / FPS
@@ -108,14 +148,11 @@ def main() -> None:
                     m = -1
                 if m != pal_mtime:
                     pal_mtime, pal = m, load_palette(PALETTE)
-            stock_now = False
-            try:
-                st = os.stat(ROUTE)
-                if time.time() - st.st_mtime < ROUTE_TTL:
-                    with open(ROUTE) as fh:
-                        stock_now = fh.read(16).strip() == "alice"
-            except OSError:
-                pass
+            for ln in log.lines():
+                k = ln.find(b"Creating spectrogram: ")
+                if k >= 0:
+                    voice = b"voice" in ln[k:]
+            stock_now = voice and not assistant_route()
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
                 vals = recolor(frame, None if stock_now else pal)
