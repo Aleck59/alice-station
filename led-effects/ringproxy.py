@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -37,6 +38,8 @@ ROUTE_TTL = 45
 # Что сейчас рисует maind (речь или музыка) — по его журналу:
 # "Creating spectrogram: pulsing_voice" — речь, "...: ball/disco/..." — музыка.
 MAIND_LOG = "/data/quasar/daemons_logs/maind.log"
+# в журнале maind между словами два пробела: "Creating  spectrogram: ball"
+SPECTRO = re.compile(rb"Creating\s+spectrogram: (\S+)")
 
 
 class LogTail:
@@ -149,9 +152,9 @@ def main() -> None:
                 if m != pal_mtime:
                     pal_mtime, pal = m, load_palette(PALETTE)
             for ln in log.lines():
-                k = ln.find(b"Creating spectrogram: ")
-                if k >= 0:
-                    voice = b"voice" in ln[k:]
+                m = SPECTRO.search(ln)
+                if m:
+                    voice = m.group(1).endswith(b"voice")
             stock_now = voice and not assistant_route()
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
