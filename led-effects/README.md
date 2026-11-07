@@ -19,6 +19,7 @@
 | `ledtheme.sh` | переключатель на колонке: `ledtheme fire`, `ledtheme random`, `ledtheme lamp party` |
 | `S96ledtheme` | init-скрипт: подключает копию до старта quasar |
 | `ringproxy.py` | служба-перекраска кадров fb0 в цвета темы (эквалайзер) |
+| `seamcheck.py` | проверка стыков циклов (конец цикла → начало, вступление → цикл) |
 | `install.sh` | установка в `/data/led-effects` (`--boot` — ещё и автозапуск) |
 
 Темы: `aurora` (сияние), `fire`, `ocean`, `rainbow`, `sakura`, `stock`.

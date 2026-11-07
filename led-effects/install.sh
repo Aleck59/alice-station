@@ -11,6 +11,7 @@ $PY "$HERE/gen_effects.py" "$BASE" /data/ledpatterns.orig/ring
 cp "$HERE/ledtheme.sh" "$BASE/ledtheme" && chmod 755 "$BASE/ledtheme"
 cp "$HERE/ringproxy.py" "$BASE/ringproxy.py"
 ln -sf "$BASE/ledtheme" /opt/bin/ledtheme 2>/dev/null || true
+$PY "$HERE/seamcheck.py" "$BASE"/themes/*/ring/*.led "$BASE"/extra/ring/*.led || echo "внимание: есть скачки на стыках (см. выше)"
 "$BASE/ledtheme" mount
 if [ "$1" = --boot ]; then
     mount -o remount,rw /

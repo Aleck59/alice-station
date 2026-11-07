@@ -72,7 +72,8 @@ def fill_intro(p: Pattern, color_at, frames: int = 20) -> None:
         for i in range(N):
             d = ring_dist(i, 0)
             k = max(0.0, min(1.0, reach - d + 1))
-            frame.append(scale(color_at(i, f), k))
+            # отрицательные кадры: цвета вступления плавно переходят в цикл
+            frame.append(scale(color_at(i, f - frames), k))
         p.add(frame, intro=True)
 
 
@@ -96,7 +97,8 @@ def comet(color_at, frames: int, tail: float = 8, heads: int = 1, base: float = 
 def breathe(color_at, frames: int, lo: float = 0.15, hi: float = 1.0) -> Pattern:
     p = Pattern()
     for f in range(frames):
-        k = lo + (hi - lo) * (0.5 - 0.5 * math.cos(2 * math.pi * f / frames))
+        # начинаем с максимума: так цикл стыкуется со вступлением «набор кольца»
+        k = lo + (hi - lo) * (0.5 + 0.5 * math.cos(2 * math.pi * f / frames))
         p.add([scale(color_at(i, f), k) for i in range(N)])
     return p
 
@@ -116,8 +118,9 @@ def wave(color_at, frames: int, waves: int = 2, lo: float = 0.1) -> Pattern:
 def speak(color_at, frames: int, seed: int) -> Pattern:
     """«Речь»: мягко пульсирующее кольцо с бегущей волной, нерегулярная амплитуда."""
     rnd = random.Random(seed)
-    knots = [rnd.uniform(0.35, 1.0) for _ in range(frames // 8 + 2)]
-    knots[-1] = knots[0]  # бесшовный цикл
+    assert frames % 8 == 0
+    knots = [rnd.uniform(0.35, 1.0) for _ in range(frames // 8 + 1)]
+    knots[-1] = knots[0]  # кадр frames совпадает с кадром 0 → бесшовный цикл
     p = Pattern()
     for f in range(frames):
         x = f / 8
@@ -133,7 +136,14 @@ def speak(color_at, frames: int, seed: int) -> Pattern:
 
 # --- темы для состояний Алисы ------------------------------------------
 
+def retime(color_at, native: float, frames: int):
+    """Подогнать период цветовой анимации (native кадров) под длину цикла,
+    чтобы последний кадр цикла плавно переходил в первый."""
+    return lambda i, f: color_at(i, f * native / frames)
+
+
 def theme(colors_listen, colors_think, colors_speak, seed: int) -> dict[str, Pattern]:
+    colors_listen = retime(colors_listen, 100, 75)
     listen = breathe(colors_listen, 75, lo=0.55)  # ~1,5 с, как у штатной
     fill_intro(listen, colors_listen)
     think = comet(colors_think, 60, tail=10, heads=2, base=0.05)
@@ -183,17 +193,15 @@ THEMES = {
 # --- отдельные эффекты-подсветки ----------------------------------------
 
 def party() -> Pattern:
-    rnd = random.Random(7)
+    # все движения — целое число оборотов за 150 кадров, поэтому цикл бесшовный
     p = Pattern()
-    hues = [rnd.random() for _ in range(N)]
     for f in range(150):
-        if f % 5 == 0:
-            for _ in range(4):
-                hues[rnd.randrange(N)] = rnd.random()
+        t = f / 150
         frame = []
         for i in range(N):
-            k = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(2 * math.pi * (f / 25 + i / 6)))
-            frame.append(scale(hsv(hues[i] + f / 150), k))
+            k = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(2 * math.pi * (6 * t + i / 6)))
+            h = i / N + t + 0.18 * math.sin(2 * math.pi * (3 * t + i / 5))
+            frame.append(scale(hsv(h), k))
         p.add(frame)
     return p
 
@@ -221,13 +229,13 @@ def color_shine() -> Pattern:
 
 
 def summer() -> Pattern:
-    return wave(grad(HEX("ffb000"), HEX("ff5000"), 300), 150, waves=1, lo=0.4)
+    return wave(grad(HEX("ffb000"), HEX("ff5000"), 150), 150, waves=1, lo=0.4)
 
 
 def game() -> Pattern:
     p = Pattern()
     cols = [HEX("ff0000"), HEX("00ff00"), HEX("0060ff"), HEX("ffff00")]
-    for f in range(120):
+    for f in range(96):  # 48 шагов сдвига = 2 оборота по 4 цвета → бесшовно
         frame = []
         for i in range(N):
             q = (i + f // 2) // 6 % 4
@@ -282,8 +290,25 @@ RECOLOR = ("intonation_spotting", "alice_listening_out", "alice_listening",
 def bt_playing_loop(color_at) -> str:
     """Штатный bluetooth_playing — вспышка и застывшее синее кольцо.
     У нас после вступления — медленная волна цветов темы, пока играет Bluetooth."""
-    p = wave(color_at, 150, waves=1, lo=0.6)
+    p = wave(retime(color_at, 100, 150), 150, waves=1, lo=0.6)
     return "loop\n" + "\n".join(p.loop) + "\n"
+
+
+def crossfade(last_line: str, first_line: str, steps: int = 20) -> str:
+    """Кадры плавного перехода между двумя строками .led (для вступление→цикл)."""
+    a = [x for x in last_line.split()[:N]]
+    b = [x for x in first_line.split()[:N]]
+    ms = first_line.split()[N]
+    rows = []
+    for k in range(1, steps + 1):
+        t = k / (steps + 1)
+        row = []
+        for ha, hb in zip(a, b):
+            ca = [int(ha[j:j + 2], 16) for j in (0, 2, 4)]
+            cb = [int(hb[j:j + 2], 16) for j in (0, 2, 4)]
+            row.append("".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(ca, cb)))
+        rows.append(" ".join(row) + " " + ms)
+    return "\n".join(rows) + "\n"
 
 TINT = {
     "aurora": grad(HEX("00ffa0"), HEX("6a00ff"), 100),
@@ -294,9 +319,16 @@ TINT = {
 }
 
 
-def recolor(text: str, color_at) -> str:
+def recolor(text: str, color_at, native: float = 100) -> str:
+    """Цвета движутся с периодом, равным длине цикла (после `loop`), а кадры
+    вступления — «до нуля», поэтому и переход вступление→цикл, и стык цикла плавные."""
+    lines = text.splitlines()
+    frames = [k for k, ln in enumerate(lines) if len(ln.split()) == N + 1]
+    loop_at = lines.index("loop") if "loop" in lines else -1
+    intro = sum(1 for k in frames if k < loop_at)
+    period = max(1, len(frames) - intro)
     out, f = [], 0
-    for line in text.splitlines():
+    for line in lines:
         parts = line.split()
         if len(parts) != N + 1:
             out.append(line)  # loop, smooth 1, no_size_optimization ...
@@ -304,7 +336,7 @@ def recolor(text: str, color_at) -> str:
         frame = []
         for i, h in enumerate(parts[:N]):
             k = max(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)) / 255
-            frame.append(hexc(scale(color_at(i, f), k)))
+            frame.append(hexc(scale(color_at(i, (f - intro) * native / period), k)))
         out.append(" ".join(frame) + " " + parts[N])
         f += 1
     return "\n".join(out) + "\n"
@@ -345,6 +377,12 @@ def main() -> None:
                 continue
             with open(src) as fh:
                 text = fh.read()
+            if name == "bluetooth_playing":
+                # штатный: вступление, `loop` и один застывший кадр — застывшую
+                # часть заменим волной темы, перекрашиваем только вступление
+                ls = text.splitlines()
+                if "loop" in ls:
+                    text = "\n".join(ls[:ls.index("loop")]) + "\n"
             for t, fn in TINT.items():
                 if name == "alice_listening":
                     continue  # у тем своя анимация слушания
@@ -352,10 +390,9 @@ def main() -> None:
                 if name == "bluetooth_playing":
                     # штатный: вступление, затем `loop` и один застывший кадр —
                     # застывшую часть заменяем волной цветов темы
-                    lines = body.splitlines()
-                    if "loop" in lines:
-                        lines = lines[:lines.index("loop")]
-                    body = "\n".join(lines) + "\n" + bt_playing_loop(fn)
+                    tail = bt_playing_loop(fn)
+                    last = [ln for ln in body.splitlines() if len(ln.split()) == N + 1][-1]
+                    body += crossfade(last, tail.splitlines()[1]) + tail
                 with open(os.path.join(out, "themes", t, "ring", name + ".led"), "w", newline="\n") as fh:
                     fh.write(body)
     print("готово:", out)
