@@ -68,4 +68,5 @@ Anthropic.
 `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '-s -w -X
 quasarbridge/internal/update.Version=0.7.4' ./cmd/quasar-bridge`), SHA-256 в `bin/SHA256SUMS`.
 На колонке заменяет `/data/opt/quasar-bridge/app/bin/quasar-bridge` (оригинал `.orig`).
+Мост шлёт `temperature: 0`, а mistral-large-4 тогда требует `top_p = 1` (400) — поэтому `temperature: 0.3` в `llm_chat_parameters`.
 Внимание: встроенное обновление моста вернёт штатный бинарник.

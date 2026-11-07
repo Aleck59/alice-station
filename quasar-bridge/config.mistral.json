@@ -14,7 +14,8 @@
   "llm_api": "chat_completions",
   "llm_chat_parameters": {
     "chat_template_kwargs": null,
-    "reasoning_effort": "low"
+    "reasoning_effort": "low",
+    "temperature": 0.3
   },
   "llm_strip_prefixes": [
     "спроси у нейросети",
