@@ -20,6 +20,7 @@ set_mode() {
 	[ "$(mode)" = "$1" ] && return 0
 	sed -i "s/\"mode\"[[:space:]]*:[[:space:]]*\"[a-z]*\"/\"mode\": \"$1\"/" "$CFG"
 	log "mode -> $1 ($2)"
+	[ "$1" = observe ] && echo alice > /var/run/alice-route
 	$CTL restart >> "$LOG" 2>&1 || log "restart failed"
 }
 key() { sed -n "s/^QUASAR_LLM_API_KEY=['\"]\{0,1\}\([^'\"]*\).*/\1/p" "$D/runtime.env" | head -n 1; }
