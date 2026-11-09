@@ -56,7 +56,7 @@ index a483ccf..4bcb633 100644
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..e11890b 100644
+index d26c9d7..9ad011d 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
 @@ -88,6 +88,7 @@ type Native struct {
@@ -135,7 +135,25 @@ index d26c9d7..e11890b 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -589,6 +619,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -497,6 +527,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 		if asr.GetEndOfUtt() {
+ 			p.final = true
+ 			slog.Info("native_asr_final", "request", requestTag(p.id), "hypotheses", len(asr.GetRecognition()), "code", asr.GetResponseCode().String())
++			unknown := len(asr.ProtoReflect().GetUnknown()) + len(e.ProtoReflect().GetUnknown()) + len(e.GetHeader().ProtoReflect().GetUnknown())
++			for _, r := range asr.GetRecognition() {
++				unknown += len(r.ProtoReflect().GetUnknown())
++			}
++			// a whisper flag from Yandex ASR would show up as unknown protobuf fields
++			slog.Info("native_asr_extra", "request", requestTag(p.id), "unknown_bytes", unknown, "unknown_hex", fmt.Sprintf("%x", asr.ProtoReflect().GetUnknown()), "parent_model", func() string {
++				if len(asr.GetRecognition()) > 0 {
++					return asr.GetRecognition()[0].GetParentModel()
++				}
++				return ""
++			}())
+ 		}
+ 		if asr.GetEndOfUtt() && len(asr.GetRecognition()) > 0 {
+ 			r := asr.GetRecognition()[0]
+@@ -589,6 +630,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -143,7 +161,7 @@ index d26c9d7..e11890b 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
-@@ -612,6 +643,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -612,6 +654,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			}
  			n.mu.Unlock()
  			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
@@ -151,7 +169,7 @@ index d26c9d7..e11890b 100644
  			return
  		}
  		p.local = true
-@@ -655,6 +687,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -655,6 +698,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  		answer.VoiceResponse.OutputSpeech.Text = new("")
  	}
  	answer.Response.Directives = n.takeSound(p)
@@ -161,7 +179,7 @@ index d26c9d7..e11890b 100644
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
  	if err != nil {
-@@ -675,7 +710,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -675,7 +721,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  	return n.synthesize(p, text)
  }
  func (n *Native) synthesize(p *nativeRequest, text string) error {
