@@ -56,7 +56,7 @@ index a483ccf..4bcb633 100644
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..f18f556 100644
+index d26c9d7..5fb5b9e 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
 @@ -88,6 +88,7 @@ type Native struct {
@@ -141,8 +141,11 @@ index d26c9d7..f18f556 100644
  		n.mu.Unlock()
  		if p.gated {
  			gated, err := wire.EnableApproval(f)
-@@ -388,6 +438,10 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -386,8 +436,13 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 		for _, d := range r.GetResponse().GetDirectives() {
+ 			ds = append(ds, d.GetType()+":"+d.GetName())
  		}
++		logCloudDirectives(r.GetResponse().GetDirectives())
  
  		slog.Info("native_cloud_shape", "matched", p != nil, "directives", ds, "cards", len(r.GetResponse().GetCards()), "voice_text_bytes", len(r.GetVoiceResponse().GetOutputSpeech().GetText()))
 +		if vt := r.GetVoiceResponse().GetOutputSpeech().GetText(); strings.Contains(vt, "<") || strings.Contains(strings.ToLower(vt), "whisper") {
@@ -152,7 +155,7 @@ index d26c9d7..f18f556 100644
  	}
  	if p == nil {
  		n.mu.Unlock()
-@@ -453,6 +507,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -453,6 +508,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -160,7 +163,7 @@ index d26c9d7..f18f556 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -497,6 +552,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -497,6 +553,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  		if asr.GetEndOfUtt() {
  			p.final = true
  			slog.Info("native_asr_final", "request", requestTag(p.id), "hypotheses", len(asr.GetRecognition()), "code", asr.GetResponseCode().String())
@@ -178,7 +181,7 @@ index d26c9d7..f18f556 100644
  		}
  		if asr.GetEndOfUtt() && len(asr.GetRecognition()) > 0 {
  			r := asr.GetRecognition()[0]
-@@ -589,6 +655,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -589,6 +656,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -186,7 +189,7 @@ index d26c9d7..f18f556 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
-@@ -612,6 +679,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -612,6 +680,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			}
  			n.mu.Unlock()
  			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
@@ -194,7 +197,7 @@ index d26c9d7..f18f556 100644
  			return
  		}
  		p.local = true
-@@ -655,6 +723,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -655,6 +724,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  		answer.VoiceResponse.OutputSpeech.Text = new("")
  	}
  	answer.Response.Directives = n.takeSound(p)
@@ -204,7 +207,7 @@ index d26c9d7..f18f556 100644
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
  	if err != nil {
-@@ -675,7 +746,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -675,7 +747,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  	return n.synthesize(p, text)
  }
  func (n *Native) synthesize(p *nativeRequest, text string) error {
@@ -971,10 +974,10 @@ index 0000000..388b396
 +}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..b699326
+index 0000000..db094b9
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,475 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
@@ -1009,6 +1012,7 @@ index 0000000..b699326
 +	request "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/events/alice_request"
 +	"github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint"
 +	animation "github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint/capabilities/animation"
++	"google.golang.org/protobuf/encoding/protojson"
 +	"google.golang.org/protobuf/proto"
 +)
 +
@@ -1311,7 +1315,7 @@ index 0000000..b699326
 +	if err != nil {
 +		return nil
 +	}
-+	return &directives.TDirective{Type: "client_action", Name: "draw_animation", AnalyticsType: "draw_animation", DirectiveType: endpoint.TCapability_DrawAnimationDirectiveType, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
++	return &directives.TDirective{Type: "client_action", Name: "draw_animation_directive", AnalyticsType: "draw_animation_directive", DirectiveType: endpoint.TCapability_DrawAnimationDirectiveType, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
 +}
 +
 +// ---- no obscene language ----
@@ -1423,6 +1427,31 @@ index 0000000..b699326
 +			}
 +			return shortHash(g.GetPersId())
 +		}(), "users", strings.Join(users, ","), "enrolled", strings.Join(enrolled, ","), "speaker", speaker)
++}
++
++// logCloudDirectives records how the stock cloud draws emotions on the clock:
++// animation directives in full (they carry no user data).
++func logCloudDirectives(ds []*directives.TDirective) {
++	for _, d := range ds {
++		if !strings.Contains(d.GetName(), "animation") && !strings.Contains(d.GetName(), "emotion") {
++			continue
++		}
++		body := ""
++		if raw := d.GetPayloadRaw(); len(raw) > 0 {
++			var m animation.TAnimationCapability_TDrawAnimationDirective
++			if err := proto.Unmarshal(raw, &m); err == nil {
++				body = protojson.Format(&m)
++			} else {
++				body = fmt.Sprintf("raw:%x", raw)
++			}
++		} else if pl := d.GetPayload(); pl != nil {
++			body = protojson.Format(pl)
++		}
++		if len(body) > 6000 {
++			body = body[:6000]
++		}
++		slog.Info("native_cloud_animation", "name", d.GetName(), "type", d.GetType(), "directive_type", d.GetDirectiveType().String(), "led_silent", d.GetIsLedSilent(), "payload", body)
++	}
 +}
 diff --git a/internal/llm/client.go b/internal/llm/client.go
 index 15a05f2..dedc6c3 100644
