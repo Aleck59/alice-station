@@ -56,7 +56,7 @@ index a483ccf..4bcb633 100644
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..2e4263a 100644
+index d26c9d7..e11890b 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
 @@ -88,6 +88,7 @@ type Native struct {
@@ -116,7 +116,18 @@ index d26c9d7..2e4263a 100644
  		n.mu.Unlock()
  		if p.gated {
  			gated, err := wire.EnableApproval(f)
-@@ -453,6 +478,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -388,6 +413,10 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 		}
+ 
+ 		slog.Info("native_cloud_shape", "matched", p != nil, "directives", ds, "cards", len(r.GetResponse().GetCards()), "voice_text_bytes", len(r.GetVoiceResponse().GetOutputSpeech().GetText()))
++		if vt := r.GetVoiceResponse().GetOutputSpeech().GetText(); strings.Contains(vt, "<") || strings.Contains(strings.ToLower(vt), "whisper") {
++			// how the stock cloud marks whisper/emotion in its own replies (markup only, no user text)
++			slog.Info("native_cloud_voice_markup", "tags", cloudMarkup(vt))
++		}
+ 	}
+ 	if p == nil {
+ 		n.mu.Unlock()
+@@ -453,6 +482,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -124,7 +135,7 @@ index d26c9d7..2e4263a 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -589,6 +615,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -589,6 +619,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -132,7 +143,7 @@ index d26c9d7..2e4263a 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
-@@ -612,6 +639,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -612,6 +643,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			}
  			n.mu.Unlock()
  			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
@@ -140,7 +151,7 @@ index d26c9d7..2e4263a 100644
  			return
  		}
  		p.local = true
-@@ -655,6 +683,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -655,6 +687,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  		answer.VoiceResponse.OutputSpeech.Text = new("")
  	}
  	answer.Response.Directives = n.takeSound(p)
@@ -150,7 +161,7 @@ index d26c9d7..2e4263a 100644
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
  	if err != nil {
-@@ -675,7 +706,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -675,7 +710,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  	return n.synthesize(p, text)
  }
  func (n *Native) synthesize(p *nativeRequest, text string) error {
@@ -779,10 +790,10 @@ index 0000000..295215d
 +}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..43a16e7
+index 0000000..80b9c71
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,393 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
@@ -1161,6 +1172,21 @@ index 0000000..43a16e7
 +}
 +
 +const rewriteNoMat = "Перепиши ответ голосовой колонки без нецензурной лексики и без грубых ругательств. Сохрани смысл, иронию и остроумие, ответ должен остаться колким, но приличным. Верни только новый текст ответа, без пояснений и без кавычек."
++
++var markupRe = regexp.MustCompile(`<[^<>]{1,120}>`)
++
++// cloudMarkup lists the distinct markup tags of a cloud voice text.
++func cloudMarkup(text string) string {
++	seen := map[string]bool{}
++	var out []string
++	for _, t := range markupRe.FindAllString(text, 20) {
++		if !seen[t] {
++			seen[t] = true
++			out = append(out, t)
++		}
++	}
++	return strings.Join(out, " ")
++}
 diff --git a/internal/llm/client.go b/internal/llm/client.go
 index 15a05f2..dedc6c3 100644
 --- a/internal/llm/client.go
