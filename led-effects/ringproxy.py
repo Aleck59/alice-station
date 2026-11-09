@@ -41,6 +41,8 @@ ROUTE_TTL = 45
 MAIND_LOG = "/data/quasar/daemons_logs/maind.log"
 # в журнале maind между словами два пробела: "Creating  spectrogram: ball"
 SPECTRO = re.compile(rb"Creating\s+spectrogram: (\S+)")
+# что сейчас играет: "Play animations: [ ring_spectrogram ]" или "[ ring//x.led ]"
+PLAYING = re.compile(rb"Play\s+animations:\s*\[(.*)\]")
 
 
 class LogTail:
@@ -140,12 +142,15 @@ def is_stock_purple(r: int, g: int, b: int) -> bool:
     return b > 8 and g * 3 <= b and r * 10 <= b * 6
 
 
-def recolor(frame: bytes, pal) -> list[int]:
+def recolor(frame: bytes, pal, everything: bool = False) -> list[int]:
+    """everything=True — визуализатор (речь/музыка): цвета шлёт сервер и они
+    меняются (было 370fff, теперь ff0f37), поэтому красим каждый светящийся
+    пиксель, сохраняя яркость. Иначе — только штатный фиолетовый .led-анимаций."""
     out = []
     for i in range(N):
         r, g, b = frame[3 * i], frame[3 * i + 1], frame[3 * i + 2]
-        if pal is not None and is_stock_purple(r, g, b):
-            k = b / 255  # у 370fff максимум — синий канал
+        if pal is not None and (everything or is_stock_purple(r, g, b)):
+            k = max(r, g, b) / 255
             pr, pg, pb = pal[i]
             out += [round(pr * k), round(pg * k), round(pb * k)]
         else:
@@ -168,7 +173,7 @@ def main() -> None:
     pal, pal_mtime, pal_check = None, 0.0, 0.0
     last: list[int] = []
     full_at = 0.0
-    log, voice = LogTail(MAIND_LOG), False
+    log, voice, spectro = LogTail(MAIND_LOG), False, False
     set_triggers("none")
     try:
         period = 1.0 / FPS
@@ -186,12 +191,16 @@ def main() -> None:
                 m = SPECTRO.search(ln)
                 if m:
                     voice = m.group(1).endswith(b"voice")
-            assistant = voice and assistant_route()
-            stock_now = voice and not assistant
+                m = PLAYING.search(ln)
+                if m:
+                    spectro = b"spectrogram" in m.group(1)
+            speech = spectro and voice
+            assistant = speech and assistant_route()
+            stock_now = speech and not assistant
             use_pal = (emotion_palette() or pal) if assistant else pal
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
-                vals = recolor(frame, None if stock_now else use_pal)
+                vals = recolor(frame, None if stock_now else use_pal, everything=spectro)
                 # Пишем только изменившиеся каналы (быстро, без задержки кадра),
                 # а раз в 0,5 с — все 72, на случай если контроллер что-то не применил.
                 full = t0 - full_at > 0.5
