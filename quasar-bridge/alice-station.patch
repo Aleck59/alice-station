@@ -56,7 +56,7 @@ index a483ccf..4bcb633 100644
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..9ad011d 100644
+index d26c9d7..f18f556 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
 @@ -88,6 +88,7 @@ type Native struct {
@@ -67,7 +67,7 @@ index d26c9d7..9ad011d 100644
  	wg               sync.WaitGroup
  	OnRoute          func(id, route string)
  	GateText         bool
-@@ -114,10 +115,21 @@ func (n *Native) Close() {
+@@ -114,10 +115,46 @@ func (n *Native) Close() {
  }
  func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byte) error {
  	f := wire.Decode(data, wire.ClientToServer)
@@ -86,10 +86,35 @@ index d26c9d7..9ad011d 100644
  	}
  	e := f.Client.GetEvent()
 +	slog.Info("native_client_event", "kind", f.Kind(), "bytes", len(data), "stream", e.GetHeader().GetStreamId(), "ref", requestTag(e.GetHeader().GetRefMessageId()))
++	if mu := e.GetMatchedUser(); mu != nil {
++		n.mu.Lock()
++		var target *nativeRequest
++		for _, id := range []string{e.GetHeader().GetRefMessageId(), mu.GetVoiceInputMessageId()} {
++			if q := n.requests[id]; id != "" && q != nil {
++				target = q
++				break
++			}
++		}
++		if target == nil && mu.GetHeader().GetRequestId() != "" {
++			for _, q := range n.requests {
++				if q.request.GetHeader().GetRequestId() == mu.GetHeader().GetRequestId() {
++					target = q
++					break
++				}
++			}
++		}
++		n.mu.Unlock()
++		if target != nil {
++			voiceFrom(target.ctx).matchedUser(mu)
++		} else {
++			slog.Info("native_matched_user_orphan", "ref", requestTag(e.GetHeader().GetRefMessageId()), "voice_input", requestTag(mu.GetVoiceInputMessageId()))
++			(&voiceInfo{id: "orphan"}).matchedUser(mu)
++		}
++	}
  	if stat := e.GetRequestStat(); stat != nil {
  		kind := "none"
  		raw := strings.ToLower(stat.GetError())
-@@ -158,6 +170,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+@@ -158,6 +195,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
  		}
  		pctx, cancel := context.WithTimeout(dialogue.WithSpeaker(n.ctx, scope), 90*time.Second)
  		pctx = reply.WithPolicy(pctx)
@@ -98,7 +123,7 @@ index d26c9d7..9ad011d 100644
  		playerState := nativePlaybackState(req)
  		pctx = sound.WithPlaybackState(pctx, playerState)
  		slog.Info("native_player_state", "request", requestTag(id), "present", playerState.Present, "player_state", playerState.PlayerState, "offset_known", playerState.OffsetKnown, "offset_ms", playerState.OffsetMS, "has_stream", playerState.StreamID != "", "stream_tag", requestTag(playerState.StreamID))
-@@ -207,6 +221,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+@@ -207,6 +246,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
  			}
  		})
  		n.requests[id] = p
@@ -116,7 +141,7 @@ index d26c9d7..9ad011d 100644
  		n.mu.Unlock()
  		if p.gated {
  			gated, err := wire.EnableApproval(f)
-@@ -388,6 +413,10 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -388,6 +438,10 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  		}
  
  		slog.Info("native_cloud_shape", "matched", p != nil, "directives", ds, "cards", len(r.GetResponse().GetCards()), "voice_text_bytes", len(r.GetVoiceResponse().GetOutputSpeech().GetText()))
@@ -127,7 +152,7 @@ index d26c9d7..9ad011d 100644
  	}
  	if p == nil {
  		n.mu.Unlock()
-@@ -453,6 +482,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -453,6 +507,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -135,7 +160,7 @@ index d26c9d7..9ad011d 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -497,6 +527,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -497,6 +552,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  		if asr.GetEndOfUtt() {
  			p.final = true
  			slog.Info("native_asr_final", "request", requestTag(p.id), "hypotheses", len(asr.GetRecognition()), "code", asr.GetResponseCode().String())
@@ -153,7 +178,7 @@ index d26c9d7..9ad011d 100644
  		}
  		if asr.GetEndOfUtt() && len(asr.GetRecognition()) > 0 {
  			r := asr.GetRecognition()[0]
-@@ -589,6 +630,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -589,6 +655,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -161,7 +186,7 @@ index d26c9d7..9ad011d 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
-@@ -612,6 +654,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -612,6 +679,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			}
  			n.mu.Unlock()
  			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
@@ -169,7 +194,7 @@ index d26c9d7..9ad011d 100644
  			return
  		}
  		p.local = true
-@@ -655,6 +698,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -655,6 +723,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  		answer.VoiceResponse.OutputSpeech.Text = new("")
  	}
  	answer.Response.Directives = n.takeSound(p)
@@ -179,7 +204,7 @@ index d26c9d7..9ad011d 100644
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
  	if err != nil {
-@@ -675,7 +721,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -675,7 +746,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  	return n.synthesize(p, text)
  }
  func (n *Native) synthesize(p *nativeRequest, text string) error {
@@ -372,10 +397,10 @@ index 0000000..998e782
 +}
 diff --git a/internal/bridge/silk.go b/internal/bridge/silk.go
 new file mode 100644
-index 0000000..295215d
+index 0000000..388b396
 --- /dev/null
 +++ b/internal/bridge/silk.go
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,568 @@
 +package bridge
 +
 +// Whisper detection from the microphone stream without decoding audio
@@ -390,6 +415,7 @@ index 0000000..295215d
 +
 +import (
 +	"encoding/binary"
++	"sort"
 +)
 +
 +// silkStats summarizes one utterance.
@@ -407,7 +433,15 @@ index 0000000..295215d
 +	CELTPitched int
 +	CELTFlat    int
 +	CELTGainSum int // sum of post-filter gain steps (1..8) of pitched frames
++	// Coarse band energies (log2) predicted across frames, and per-frame
++	// level and spectral tilt: voiced speech has strong harmonics below
++	// 600 Hz, whisper is breath noise with almost nothing there.
++	celtE    [21]float64
++	Frames   []celtFrame
++	celtFail int
 +}
++
++type celtFrame struct{ Level, Tilt float64 }
 +
 +// PitchedRatio is the share of non-silent CELT frames with the pitch filter on.
 +func (s silkStats) PitchedRatio() float64 {
@@ -796,22 +830,151 @@ index 0000000..295215d
 +		s.Skipped++
 +		return
 +	}
-+	if !d.bitLogp(1) {
++	if d.bitLogp(1) {
++		octave := d.uintSmall(6)
++		_ = d.bits(int(4 + octave))
++		qg := d.bits(3)
++		if d.tell()+2 <= total {
++			d.icdf([]uint8{2, 1, 0}, 2)
++		}
++		s.CELTPitched++
++		s.CELTGainSum += int(qg) + 1
++	} else {
 +		s.CELTFlat++
-+		return
 +	}
-+	octave := d.uintSmall(6)
-+	_ = d.bits(int(4 + octave))
-+	qg := d.bits(3)
-+	s.CELTPitched++
-+	s.CELTGainSum += int(qg) + 1
++	if p[0]&0x04 != 0 {
++		return // stereo energies interleave channels; the Station mic is mono
++	}
++	config := int(p[0] >> 3)
++	lm := config % 4 // 2.5, 5, 10, 20 ms
++	end := []int{13, 17, 19, 21}[(config-16)/4]
++	if lm > 0 && d.tell()+3 <= total {
++		d.bitLogp(3) // transient
++	}
++	intra := false
++	if d.tell()+3 <= total {
++		intra = d.bitLogp(3)
++	}
++	s.coarseEnergy(d, total, lm, end, intra)
++}
++
++var (
++	celtPredCoef = [4]float64{29440 / 32768., 26112 / 32768., 21248 / 32768., 16384 / 32768.}
++	celtBetaCoef = [4]float64{30147 / 32768., 22282 / 32768., 12124 / 32768., 6554 / 32768.}
++	celtEMeans   = [21]float64{6.4375, 6.25, 5.75, 5.3125, 5.0625, 4.8125, 4.5, 4.375, 4.875, 4.6875,
++		4.5625, 4.4375, 4.875, 4.625, 4.3125, 4.5, 4.375, 4.625, 4.75, 4.4375, 3.75}
++	// e_prob_model from libopus celt/quant_bands.c: [LM][intra][2*band]
++	celtProbModel = [4][2][42]uint8{
++		{{72, 127, 65, 129, 66, 128, 65, 128, 64, 128, 62, 128, 64, 128, 64, 128, 92, 78, 92, 79, 92, 78, 90, 79, 116, 41, 115, 40, 114, 40, 132, 26, 132, 26, 145, 17, 161, 12, 176, 10, 177, 11},
++			{24, 179, 48, 138, 54, 135, 54, 132, 53, 134, 56, 133, 55, 132, 55, 132, 61, 114, 70, 96, 74, 88, 75, 88, 87, 74, 89, 66, 91, 67, 100, 59, 108, 50, 120, 40, 122, 37, 97, 43, 78, 50}},
++		{{83, 78, 84, 81, 88, 75, 86, 74, 87, 71, 90, 73, 93, 74, 93, 74, 109, 40, 114, 36, 117, 34, 117, 34, 143, 17, 145, 18, 146, 19, 162, 12, 165, 10, 178, 7, 189, 6, 190, 8, 177, 9},
++			{23, 178, 54, 115, 63, 102, 66, 98, 69, 99, 74, 89, 71, 91, 73, 91, 78, 89, 86, 80, 92, 66, 93, 64, 102, 59, 103, 60, 104, 60, 117, 52, 123, 44, 138, 35, 133, 31, 97, 38, 77, 45}},
++		{{61, 90, 93, 60, 105, 42, 107, 41, 110, 45, 116, 38, 113, 38, 112, 38, 124, 26, 132, 27, 136, 19, 140, 20, 155, 14, 159, 16, 158, 18, 170, 13, 177, 10, 187, 8, 192, 6, 175, 9, 159, 10},
++			{21, 178, 59, 110, 71, 86, 75, 85, 84, 83, 91, 66, 88, 73, 87, 72, 92, 75, 98, 72, 105, 58, 107, 54, 115, 52, 114, 55, 112, 56, 129, 51, 132, 40, 150, 33, 140, 29, 98, 35, 77, 42}},
++		{{42, 121, 96, 66, 108, 43, 111, 40, 117, 44, 123, 32, 120, 36, 119, 33, 127, 33, 134, 34, 139, 21, 147, 23, 152, 20, 158, 25, 154, 26, 166, 21, 173, 16, 184, 13, 184, 10, 150, 13, 139, 15},
++			{22, 178, 63, 114, 74, 82, 84, 83, 92, 82, 103, 62, 96, 72, 96, 67, 101, 73, 107, 72, 113, 55, 118, 52, 125, 52, 118, 52, 117, 55, 135, 49, 137, 39, 157, 32, 145, 29, 97, 33, 77, 40}},
++	}
++)
++
++func (d *rangeDec) decodeBin(bits uint) uint32 {
++	d.ext = d.rng >> bits
++	s := d.val / d.ext
++	return 1<<bits - min(s+1, 1<<bits)
++}
++
++// laplace is ec_laplace_decode from libopus celt/laplace.c.
++func (d *rangeDec) laplace(fs uint32, decay uint32) int {
++	const minp = 1
++	const nmin = 16
++	val := 0
++	fm := d.decodeBin(15)
++	var fl uint32
++	if fm >= fs {
++		val++
++		fl = fs
++		fs = ((32768-minp*2*nmin-fs)*(16384-decay))>>15 + minp
++		for fs > minp && fm >= fl+2*fs {
++			fs *= 2
++			fl += fs
++			fs = ((fs - 2*minp) * decay) >> 15
++			fs += minp
++			val++
++		}
++		if fs <= minp {
++			di := (fm - fl) >> 1
++			val += int(di)
++			fl += 2 * di * minp
++		}
++		if fm < fl+fs {
++			val = -val
++		} else {
++			fl += fs
++		}
++	}
++	d.update(fl, min(fl+fs, 32768), 32768)
++	return val
++}
++
++func (s *silkStats) coarseEnergy(d *rangeDec, total, lm, end int, intra bool) {
++	coef, beta := celtPredCoef[lm], celtBetaCoef[lm]
++	model := celtProbModel[lm][0]
++	if intra {
++		coef, beta = 0, 4915/32768.
++		model = celtProbModel[lm][1]
++	}
++	prev := 0.0
++	for i := 0; i < end; i++ {
++		var qi int
++		left := total - d.tell()
++		switch {
++		case left >= 15:
++			pi := 2 * min(i, 20)
++			qi = d.laplace(uint32(model[pi])<<7, uint32(model[pi+1])<<6)
++		case left >= 2:
++			v := d.icdf([]uint8{2, 1, 0}, 2)
++			qi = (v >> 1) ^ -(v & 1)
++		case left >= 1:
++			if d.bitLogp(1) {
++				qi = -1
++			}
++		default:
++			qi = -1
++		}
++		q := float64(qi)
++		old := max(-9, s.celtE[i])
++		s.celtE[i] = coef*old + prev + q
++		prev = prev + q - beta*q
++	}
++	abs := func(i int) float64 { return s.celtE[i] + celtEMeans[i] }
++	low := (abs(0) + abs(1) + abs(2)) / 3
++	mid := (abs(8) + abs(9) + abs(10) + abs(11) + abs(12)) / 5
++	level := 0.0
++	for i := 0; i < 13; i++ {
++		level = max(level, abs(i))
++	}
++	if len(s.Frames) < 1500 {
++		s.Frames = append(s.Frames, celtFrame{Level: level, Tilt: low - mid})
++	}
++}
++
++// CELTTilt returns the median low-minus-mid band energy (log2 units, 1 = 6 dB)
++// over the loudest 30% of frames, and how many frames it used.
++func (s silkStats) CELTTilt() (float64, int) {
++	if len(s.Frames) == 0 {
++		return 0, 0
++	}
++	fs := append([]celtFrame(nil), s.Frames...)
++	sort.Slice(fs, func(i, j int) bool { return fs[i].Level > fs[j].Level })
++	fs = fs[:max(1, len(fs)*3/10)]
++	sort.Slice(fs, func(i, j int) bool { return fs[i].Tilt < fs[j].Tilt })
++	return fs[len(fs)/2].Tilt, len(fs)
 +}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..80b9c71
+index 0000000..b699326
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,449 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
@@ -821,6 +984,7 @@ index 0000000..80b9c71
 +//   QUASAR_WHISPER=0                  disable whisper detection
 +//   QUASAR_WHISPER_VOICED_MAX=0.2     voiced share of speech below which it is a whisper
 +//   QUASAR_WHISPER_MIN_FRAMES=12      minimum active 20 ms frames to decide
++//   QUASAR_WHISPER_CELT_TILT_MAX=1.5  CELT: low-minus-mid energy (log2) at or below which it is a whisper
 +//   QUASAR_WHISPER_TTS_PREFIX='<speaker is_whisper="true">'   TTS markup for a whispered reply ("-" = none)
 +//   QUASAR_WHISPER_TTS_VOLUME=0.5     TtsGenerate.Volume for a whispered reply (0 = not set)
 +//   QUASAR_TTS_EMOTION=1              send TtsGenerate.Emotion (good/evil/neutral) from the model's mood tag
@@ -942,16 +1106,19 @@ index 0000000..80b9c71
 +		if s.VoicedRatio() <= envFloat("QUASAR_WHISPER_VOICED_MAX", 0.2) {
 +			v.whisper = 1
 +		}
-+	} else if celtFrames >= min && celtGain <= envFloat("QUASAR_WHISPER_CELT_GAIN_MAX", 3.0) {
-+		// CELT: mean pitch post-filter strength over non-silent frames
-+		// (0 = no pitch, 8 = strong pitch); whisper has little or none.
++	} else if tilt, n := s.CELTTilt(); n >= min && tilt <= envFloat("QUASAR_WHISPER_CELT_TILT_MAX", 1.5) {
++		// CELT (the Station mic): low (0-600 Hz) minus mid (1.6-4 kHz) band
++		// energy of the loudest frames, log2 units (1 = 6 dB). Voiced speech
++		// has strong harmonics low, whisper is breath noise without them.
 +		v.whisper = 1
 +	}
++	tilt, tiltFrames := s.CELTTilt()
 +	slog.Info("native_whisper", "request", v.id, "whisper", v.whisper == 1, "packets", s.Packets, "celt", s.CELT,
 +		"skipped", s.Skipped, "inactive", s.Inactive, "voiced", s.Voiced, "unvoiced", s.Unvoiced,
 +		"voiced_ratio", fmt.Sprintf("%.2f", s.VoicedRatio()), "gain", fmt.Sprintf("%.1f", s.MeanGain()),
 +		"celt_silent", s.CELTSilent, "celt_pitched", s.CELTPitched, "celt_flat", s.CELTFlat,
-+		"celt_pitched_ratio", fmt.Sprintf("%.2f", s.PitchedRatio()), "celt_pitch_gain", fmt.Sprintf("%.2f", celtGain))
++		"celt_pitched_ratio", fmt.Sprintf("%.2f", s.PitchedRatio()), "celt_pitch_gain", fmt.Sprintf("%.2f", celtGain),
++		"celt_tilt", fmt.Sprintf("%.2f", tilt), "celt_tilt_frames", tiltFrames)
 +	return v.whisper == 1
 +}
 +
@@ -994,6 +1161,15 @@ index 0000000..80b9c71
 +	}
 +	return m
 +}
++func (v *voiceInfo) speakerID() string {
++	if v == nil {
++		return ""
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	return v.speaker
++}
++
 +func speakerName(id string) string {
 +	if id == "" {
 +		return ""
@@ -1014,13 +1190,13 @@ index 0000000..80b9c71
 +	name := []rune(m[1])
 +	name[0] = []rune(strings.ToUpper(string(name[0])))[0]
 +	v := voiceFrom(ctx)
-+	if v == nil || v.speaker == "" {
++	if v == nil || v.speakerID() == "" {
 +		return "Приятно познакомиться, " + string(name) + "! Только по голосу я пока людей не различаю: добавьте свой голос в приложении «Дом с Алисой», и тогда я буду вас узнавать.", true
 +	}
 +	voicesMu.Lock()
 +	defer voicesMu.Unlock()
 +	all := loadVoices()
-+	all[v.speaker] = string(name)
++	all[v.speakerID()] = string(name)
 +	b, _ := json.MarshalIndent(all, "", "  ")
 +	if err := os.WriteFile(voicesPath(), b, 0o600); err != nil {
 +		return "Не получилось запомнить имя.", true
@@ -1033,7 +1209,7 @@ index 0000000..80b9c71
 +	var b strings.Builder
 +	v := voiceFrom(ctx)
 +	if v != nil {
-+		if name := speakerName(v.speaker); name != "" {
++		if name := speakerName(v.speakerID()); name != "" {
 +			b.WriteString("\n\nСейчас говорит " + name + " (узнан(а) по голосу). Можно иногда, к месту, обращаться по имени, но не в каждой реплике.")
 +		}
 +		if v.isWhisper(id) {
@@ -1204,6 +1380,49 @@ index 0000000..80b9c71
 +		}
 +	}
 +	return strings.Join(out, " ")
++}
++
++// matchedUser applies the on-device voice biometry result that aliced sends
++// as a MatchedUser event after the phrase (the VoiceInput itself has none).
++func (v *voiceInfo) matchedUser(mu *request.TAliceRequestProto) {
++	if v == nil || mu == nil {
++		return
++	}
++	add := mu.GetRequest().GetAdditionalOptions()
++	g := add.GetGuestUserOptions()
++	users := []string{}
++	for _, u := range add.GetUsersOptions() {
++		if u.GetPersId() != "" {
++			users = append(users, shortHash(u.GetPersId()))
++		} else if u.GetPuid() != "" {
++			users = append(users, "puid:"+shortHash(u.GetPuid()))
++		}
++	}
++	enrolled := []string{}
++	for _, h := range mu.GetEnrollmentHeaders().GetHeaders() {
++		enrolled = append(enrolled, h.GetUserType().String()+":"+shortHash(h.GetPersonId()))
++	}
++	for _, h := range g.GetEnrollmentHeaders().GetHeaders() {
++		enrolled = append(enrolled, "g"+h.GetUserType().String()+":"+shortHash(h.GetPersonId()))
++	}
++	speaker := ""
++	if g.GetStatus().String() == "Match" && g.GetPersId() != "" {
++		speaker = "pers:" + shortHash(g.GetPersId())
++	}
++	v.mu.Lock()
++	if speaker != "" {
++		v.speaker = speaker
++	}
++	v.mu.Unlock()
++	slog.Info("native_matched_user", "request", v.id, "guest", g != nil, "guest_origin", g.GetGuestOrigin().String(),
++		"guest_status", g.GetStatus().String(), "guest_confidence", g.GetMatchConfidence().String(),
++		"confidence10", g.GetConfidenceLevel10(), "owner_enrolled", g.GetIsOwnerEnrolled(),
++		"guest_pers", func() string {
++			if g.GetPersId() == "" {
++				return ""
++			}
++			return shortHash(g.GetPersId())
++		}(), "users", strings.Join(users, ","), "enrolled", strings.Join(enrolled, ","), "speaker", speaker)
 +}
 diff --git a/internal/llm/client.go b/internal/llm/client.go
 index 15a05f2..dedc6c3 100644
