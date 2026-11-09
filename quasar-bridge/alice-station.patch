@@ -56,7 +56,7 @@ index a483ccf..4bcb633 100644
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..836bd6a 100644
+index d26c9d7..2e4263a 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
 @@ -88,6 +88,7 @@ type Native struct {
@@ -67,7 +67,7 @@ index d26c9d7..836bd6a 100644
  	wg               sync.WaitGroup
  	OnRoute          func(id, route string)
  	GateText         bool
-@@ -114,6 +115,16 @@ func (n *Native) Close() {
+@@ -114,10 +115,21 @@ func (n *Native) Close() {
  }
  func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byte) error {
  	f := wire.Decode(data, wire.ClientToServer)
@@ -84,7 +84,12 @@ index d26c9d7..836bd6a 100644
  	if f.Client == nil || f.Client.GetEvent() == nil {
  		return n.up(ctx, k, data)
  	}
-@@ -158,6 +169,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+ 	e := f.Client.GetEvent()
++	slog.Info("native_client_event", "kind", f.Kind(), "bytes", len(data), "stream", e.GetHeader().GetStreamId(), "ref", requestTag(e.GetHeader().GetRefMessageId()))
+ 	if stat := e.GetRequestStat(); stat != nil {
+ 		kind := "none"
+ 		raw := strings.ToLower(stat.GetError())
+@@ -158,6 +170,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
  		}
  		pctx, cancel := context.WithTimeout(dialogue.WithSpeaker(n.ctx, scope), 90*time.Second)
  		pctx = reply.WithPolicy(pctx)
@@ -93,7 +98,7 @@ index d26c9d7..836bd6a 100644
  		playerState := nativePlaybackState(req)
  		pctx = sound.WithPlaybackState(pctx, playerState)
  		slog.Info("native_player_state", "request", requestTag(id), "present", playerState.Present, "player_state", playerState.PlayerState, "offset_known", playerState.OffsetKnown, "offset_ms", playerState.OffsetMS, "has_stream", playerState.StreamID != "", "stream_tag", requestTag(playerState.StreamID))
-@@ -207,6 +220,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+@@ -207,6 +221,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
  			}
  		})
  		n.requests[id] = p
@@ -111,7 +116,7 @@ index d26c9d7..836bd6a 100644
  		n.mu.Unlock()
  		if p.gated {
  			gated, err := wire.EnableApproval(f)
-@@ -453,6 +477,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -453,6 +478,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -119,7 +124,7 @@ index d26c9d7..836bd6a 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -589,6 +614,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -589,6 +615,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -127,7 +132,15 @@ index d26c9d7..836bd6a 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
-@@ -655,6 +681,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -612,6 +639,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+ 			}
+ 			n.mu.Unlock()
+ 			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
++			voiceFrom(p.ctx).isWhisper("")
+ 			return
+ 		}
+ 		p.local = true
+@@ -655,6 +683,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  		answer.VoiceResponse.OutputSpeech.Text = new("")
  	}
  	answer.Response.Directives = n.takeSound(p)
@@ -137,7 +150,7 @@ index d26c9d7..836bd6a 100644
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
  	if err != nil {
-@@ -675,7 +704,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -675,7 +706,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  	return n.synthesize(p, text)
  }
  func (n *Native) synthesize(p *nativeRequest, text string) error {
@@ -330,10 +343,10 @@ index 0000000..998e782
 +}
 diff --git a/internal/bridge/silk.go b/internal/bridge/silk.go
 new file mode 100644
-index 0000000..21cde1c
+index 0000000..295215d
 --- /dev/null
 +++ b/internal/bridge/silk.go
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,430 @@
 +package bridge
 +
 +// Whisper detection from the microphone stream without decoding audio
@@ -359,6 +372,21 @@ index 0000000..21cde1c
 +	Voiced   int // active voiced frames
 +	GainSum  int // sum of first gain indices (0..63) of active frames
 +	Skipped  int // packets we could not parse (stereo, code 3, too short)
++	// CELT-only packets: the pitch pre/post-filter is switched on for
++	// periodic (voiced) sound and stays off for noise-like sound (whisper).
++	CELTSilent  int
++	CELTPitched int
++	CELTFlat    int
++	CELTGainSum int // sum of post-filter gain steps (1..8) of pitched frames
++}
++
++// PitchedRatio is the share of non-silent CELT frames with the pitch filter on.
++func (s silkStats) PitchedRatio() float64 {
++	n := s.CELTPitched + s.CELTFlat
++	if n == 0 {
++		return 1
++	}
++	return float64(s.CELTPitched) / float64(n)
 +}
 +
 +func (s silkStats) Active() int { return s.Voiced + s.Unvoiced }
@@ -385,6 +413,63 @@ index 0000000..21cde1c
 +	pos      int
 +	rng, val uint32
 +	rem      uint32
++	ext      uint32
++	endOffs  int
++	endWin   uint32
++	endBits  int
++	nbits    int
++}
++
++func ilog(x uint32) int {
++	n := 0
++	for x != 0 {
++		n++
++		x >>= 1
++	}
++	return n
++}
++func (d *rangeDec) tell() int { return d.nbits - ilog(d.rng) }
++func (d *rangeDec) decode(ft uint32) uint32 {
++	d.ext = d.rng / ft
++	s := d.val / d.ext
++	return ft - min(s+1, ft)
++}
++func (d *rangeDec) update(fl, fh, ft uint32) {
++	s := d.ext * (ft - fh)
++	d.val -= s
++	if fl > 0 {
++		d.rng = d.ext * (fh - fl)
++	} else {
++		d.rng -= s
++	}
++	d.normalize()
++}
++
++// uintSmall decodes ec_dec_uint for ft <= 256.
++func (d *rangeDec) uintSmall(ft uint32) uint32 {
++	s := d.decode(ft)
++	d.update(s, s+1, ft)
++	return s
++}
++func (d *rangeDec) bits(n int) uint32 {
++	w := d.endWin
++	avail := d.endBits
++	if avail < n {
++		for avail <= 32-8 {
++			var b uint32
++			if d.endOffs < len(d.buf) {
++				d.endOffs++
++				b = uint32(d.buf[len(d.buf)-d.endOffs])
++			}
++			w |= b << avail
++			avail += 8
++		}
++	}
++	ret := w & (1<<n - 1)
++	d.endWin = w >> n
++	d.endBits = avail - n
++	d.nbits += n
++	return ret
 +}
 +
 +func (d *rangeDec) byte() uint32 {
@@ -396,7 +481,7 @@ index 0000000..21cde1c
 +	return 0
 +}
 +func newRangeDec(buf []byte) *rangeDec {
-+	d := &rangeDec{buf: buf, rng: 128}
++	d := &rangeDec{buf: buf, rng: 128, nbits: 9}
 +	d.rem = d.byte()
 +	d.val = d.rng - 1 - (d.rem >> 1)
 +	d.normalize()
@@ -404,6 +489,7 @@ index 0000000..21cde1c
 +}
 +func (d *rangeDec) normalize() {
 +	for d.rng <= 1<<23 {
++		d.nbits += 8
 +		d.rng <<= 8
 +		sym := d.rem
 +		d.rem = d.byte()
@@ -470,6 +556,7 @@ index 0000000..21cde1c
 +	config := int(toc >> 3)
 +	if config >= 16 {
 +		s.CELT++
++		s.addCELT(p)
 +		return
 +	}
 +	if toc&0x04 != 0 { // stereo: the stereo predictor comes first, skip
@@ -618,12 +705,84 @@ index 0000000..21cde1c
 +	}
 +	return binary.BigEndian.Uint32(data), true
 +}
++
++// firstFrame returns the exact bytes of the first frame (RFC 6716, 3.2).
++func firstFrame(p []byte) []byte {
++	if len(p) < 2 {
++		return nil
++	}
++	rest := p[1:]
++	switch p[0] & 3 {
++	case 0:
++		return rest
++	case 1:
++		if len(rest)%2 != 0 {
++			return nil
++		}
++		return rest[:len(rest)/2]
++	case 2:
++		n := int(rest[0])
++		hdr := 1
++		if n >= 252 {
++			if len(rest) < 2 {
++				return nil
++			}
++			n += 4 * int(rest[1])
++			hdr = 2
++		}
++		if len(rest) < hdr+n {
++			return nil
++		}
++		return rest[hdr : hdr+n]
++	default:
++		m := int(rest[0] & 0x3f)
++		if m == 0 || rest[0]&0xc0 != 0 { // VBR or padding: not needed for the Station stream
++			return nil
++		}
++		body := rest[1:]
++		if len(body)%m != 0 {
++			return nil
++		}
++		return body[:len(body)/m]
++	}
++}
++
++// addCELT reads the silence flag and the pitch post-filter flag of the
++// first CELT frame (RFC 6716, 4.3 and libopus celt_decode_with_ec).
++func (s *silkStats) addCELT(p []byte) {
++	f := firstFrame(p)
++	if len(f) < 3 {
++		s.Skipped++
++		return
++	}
++	if p[0]&0x04 != 0 { // stereo is fine: the post-filter comes before channel data
++	}
++	total := len(f) * 8
++	d := newRangeDec(f)
++	if d.tell() >= total || (d.tell() == 1 && d.bitLogp(15)) {
++		s.CELTSilent++
++		return
++	}
++	if d.tell()+16 > total {
++		s.Skipped++
++		return
++	}
++	if !d.bitLogp(1) {
++		s.CELTFlat++
++		return
++	}
++	octave := d.uintSmall(6)
++	_ = d.bits(int(4 + octave))
++	qg := d.bits(3)
++	s.CELTPitched++
++	s.CELTGainSum += int(qg) + 1
++}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..596126a
+index 0000000..43a16e7
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,378 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
@@ -663,6 +822,7 @@ index 0000000..596126a
 +// voiceInfo travels with one speaker request in its context.
 +type voiceInfo struct {
 +	mu      sync.Mutex
++	id      string
 +	created time.Time
 +	tap     micTap
 +	speaker string // stable anonymous voice id from Yandex biometry, "" if unknown
@@ -700,7 +860,7 @@ index 0000000..596126a
 +// biometry (people added in «Дом с Алисой» → «Голос») arrives as
 +// GuestUserOptions with origin VoiceBiometry and status Match.
 +func newVoiceInfo(id string, req *request.TAliceRequestProto) *voiceInfo {
-+	v := &voiceInfo{created: time.Now()}
++	v := &voiceInfo{id: requestTag(id), created: time.Now()}
 +	add := req.GetRequest().GetAdditionalOptions()
 +	g := add.GetGuestUserOptions()
 +	enrolled := []string{}
@@ -732,7 +892,7 @@ index 0000000..596126a
 +}
 +
 +// isWhisper decides once per request from the audio seen so far.
-+func (v *voiceInfo) isWhisper(id string) bool {
++func (v *voiceInfo) isWhisper(string) bool {
 +	if v == nil || !envOn("QUASAR_WHISPER", true) {
 +		return false
 +	}
@@ -744,12 +904,25 @@ index 0000000..596126a
 +	s := v.tap.stats
 +	min := int(envFloat("QUASAR_WHISPER_MIN_FRAMES", 12))
 +	v.whisper = 2
-+	if s.Active() >= min && s.VoicedRatio() <= envFloat("QUASAR_WHISPER_VOICED_MAX", 0.2) {
++	celtFrames := s.CELTPitched + s.CELTFlat
++	celtGain := 0.0
++	if celtFrames > 0 {
++		celtGain = float64(s.CELTGainSum) / float64(celtFrames)
++	}
++	if s.Active() >= min {
++		if s.VoicedRatio() <= envFloat("QUASAR_WHISPER_VOICED_MAX", 0.2) {
++			v.whisper = 1
++		}
++	} else if celtFrames >= min && celtGain <= envFloat("QUASAR_WHISPER_CELT_GAIN_MAX", 3.0) {
++		// CELT: mean pitch post-filter strength over non-silent frames
++		// (0 = no pitch, 8 = strong pitch); whisper has little or none.
 +		v.whisper = 1
 +	}
-+	slog.Info("native_whisper", "request", requestTag(id), "whisper", v.whisper == 1, "packets", s.Packets, "celt", s.CELT,
++	slog.Info("native_whisper", "request", v.id, "whisper", v.whisper == 1, "packets", s.Packets, "celt", s.CELT,
 +		"skipped", s.Skipped, "inactive", s.Inactive, "voiced", s.Voiced, "unvoiced", s.Unvoiced,
-+		"voiced_ratio", fmt.Sprintf("%.2f", s.VoicedRatio()), "gain", fmt.Sprintf("%.1f", s.MeanGain()))
++		"voiced_ratio", fmt.Sprintf("%.2f", s.VoicedRatio()), "gain", fmt.Sprintf("%.1f", s.MeanGain()),
++		"celt_silent", s.CELTSilent, "celt_pitched", s.CELTPitched, "celt_flat", s.CELTFlat,
++		"celt_pitched_ratio", fmt.Sprintf("%.2f", s.PitchedRatio()), "celt_pitch_gain", fmt.Sprintf("%.2f", celtGain))
 +	return v.whisper == 1
 +}
 +
