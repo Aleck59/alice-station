@@ -974,10 +974,10 @@ index 0000000..388b396
 +}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..db094b9
+index 0000000..8d3edf8
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,514 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
@@ -990,14 +990,19 @@ index 0000000..db094b9
 +//   QUASAR_WHISPER_CELT_TILT_MAX=1.5  CELT: low-minus-mid energy (log2) at or below which it is a whisper
 +//   QUASAR_WHISPER_TTS_PREFIX='<speaker is_whisper="true">'   TTS markup for a whispered reply ("-" = none)
 +//   QUASAR_WHISPER_TTS_VOLUME=0.5     TtsGenerate.Volume for a whispered reply (0 = not set)
-+//   QUASAR_TTS_EMOTION=1              send TtsGenerate.Emotion (good/evil/neutral) from the model's mood tag
-+//   QUASAR_EMOTION_ANIMATION=1        add a draw_animation directive (EmotionalJoy, ...) for the clock screen
++//   QUASAR_TTS_EMOTION=0              no emotional voice (<speaker voice="emotional_alice.gpu" emotion=...>)
++//   QUASAR_TTS_EMOTION_MAP            mood=emotion list, default joy/love/wow=calm_happy
++//   QUASAR_EMOTION_ANIMATION=0        no clock animation (draw_animation_directive, BinaryAnimation)
++//   QUASAR_EMOTIONS_DIR               own clock animations <mood>.scled, default /data/opt/quasar-bridge/emotions
 +//   QUASAR_EMOTION_FILE               default /var/run/alice-emotion ("-" = off), for the LED ring
 +//   QUASAR_VOICES_FILE                default /data/opt/quasar-bridge/voices.json (voice id -> name)
 +
 +import (
++	"bytes"
++	"compress/gzip"
 +	"context"
 +	"crypto/sha256"
++	"encoding/base64"
 +	"encoding/json"
 +	"fmt"
 +	"log/slog"
@@ -1010,7 +1015,6 @@ index 0000000..db094b9
 +
 +	directives "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/directives"
 +	request "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/events/alice_request"
-+	"github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint"
 +	animation "github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint/capabilities/animation"
 +	"google.golang.org/protobuf/encoding/protojson"
 +	"google.golang.org/protobuf/proto"
@@ -1217,7 +1221,7 @@ index 0000000..db094b9
 +			b.WriteString("\n\nСейчас говорит " + name + " (узнан(а) по голосу). Можно иногда, к месту, обращаться по имени, но не в каждой реплике.")
 +		}
 +		if v.isWhisper(id) {
-+			b.WriteString("\n\nСобеседник говорит шёпотом — вероятно, рядом кто-то спит. Отвечай очень коротко и спокойно, без восклицаний и встречных вопросов.")
++			b.WriteString("\n\nСобеседник говорит шёпотом — вероятно, рядом кто-то спит. Отвечай коротко, одним-двумя предложениями, мягко и спокойно, без восклицаний и встречных вопросов. Это правило важнее указаний о длине ответа.")
 +		}
 +	}
 +	b.WriteString("\n\nВ самом начале ответа поставь одну метку настроения ответа: [радость], [грусть], [удивление], [злость], [нежность] или [спокойно]. Метка не читается вслух.")
@@ -1255,67 +1259,102 @@ index 0000000..db094b9
 +	}
 +}
 +
-+// ttsStyle fills TtsGenerate options for this request.
++// ttsStyle fills TtsGenerate options for this request. Markup is the one the
++// stock cloud uses itself (seen in native_cloud_voice_markup):
++//
++//	whisper: <speaker is_whisper="true">
++//	emotion: <speaker voice="emotional_alice.gpu" emotion="calm_happy">
 +func ttsStyle(ctx context.Context, text string) (string, *float64, *string) {
 +	v := voiceFrom(ctx)
 +	var volume *float64
-+	var emotion *string
++	prefix := ""
 +	if v.isWhisper("tts") {
-+		prefix := os.Getenv("QUASAR_WHISPER_TTS_PREFIX")
-+		if prefix == "" {
-+			prefix = `<speaker is_whisper="true">`
++		w := os.Getenv("QUASAR_WHISPER_TTS_PREFIX")
++		if w == "" {
++			w = `<speaker is_whisper="true">`
 +		}
-+		if prefix != "-" {
-+			text = prefix + text
++		if w != "-" {
++			prefix += w
 +		}
 +		if vol := envFloat("QUASAR_WHISPER_TTS_VOLUME", 0.5); vol > 0 {
 +			volume = &vol
 +		}
-+		return text, volume, nil
 +	}
-+	if envOn("QUASAR_TTS_EMOTION", false) {
-+		switch v.getEmotion() {
-+		case "joy", "love", "wow":
-+			s := "good"
-+			emotion = &s
-+		case "angry":
-+			s := "evil"
-+			emotion = &s
-+		case "sad", "neutral":
-+			s := "neutral"
-+			emotion = &s
++	if envOn("QUASAR_TTS_EMOTION", true) {
++		if e := ttsEmotion(v.getEmotion()); e != "" {
++			voice := os.Getenv("QUASAR_TTS_EMOTION_VOICE")
++			if voice == "" {
++				voice = "emotional_alice.gpu"
++			}
++			prefix += `<speaker voice="` + voice + `" emotion="` + e + `">`
 +		}
 +	}
-+	return text, volume, emotion
++	return prefix + text, volume, nil
 +}
 +
-+// emotionDirective draws the stock emotion animation on the clock screen.
++// ttsEmotion maps our mood to the synthesis emotion. Only calm_happy is
++// confirmed from the cloud; others are set via QUASAR_TTS_EMOTION_MAP,
++// e.g. "joy=calm_happy,love=calm_happy,sad=sad".
++func ttsEmotion(mood string) string {
++	m := map[string]string{"joy": "calm_happy", "love": "calm_happy", "wow": "calm_happy"}
++	if spec := os.Getenv("QUASAR_TTS_EMOTION_MAP"); spec != "" {
++		m = map[string]string{}
++		for _, kv := range strings.Split(spec, ",") {
++			if k, val, ok := strings.Cut(strings.TrimSpace(kv), "="); ok && regexp.MustCompile(`^[a-z_]{1,32}$`).MatchString(val) {
++				m[k] = val
++			}
++		}
++	}
++	return m[mood]
++}
++
++// cloudSmile is the stock clock-screen animation the cloud sends with
++// «ты молодец» / «я тебя люблю» on the Station Midi (19 frames, gzip).
++const cloudSmile = "H4sIAAAAAAAAA52SQQqAQAhFjVZBSw/koTqAN/NS7aeGxkD6Qo6LEXmP4SMSlYpHl1wJyH3N/YDct9wPyP2W+wExidxNoA8Qk/Z8Cn2AmKznM+gDxNT63KD/ReueqI//Pl7bUf6/mr+6n+r+R1TkAzR7P5r7Ac3e/89azgtrDSgqkAMAAA=="
++
++// emotionAnimation returns the gzip+base64 clock animation for a mood:
++// a custom file /data/opt/quasar-bridge/emotions/<mood>.scled (raw frames:
++// 46 segment bytes + 2 bytes duration each, as in the cloud animation) wins,
++// otherwise joy/love use the stock smile.
++func emotionAnimation(mood string) string {
++	dir := envPath("QUASAR_EMOTIONS_DIR", "/data/opt/quasar-bridge/emotions")
++	if raw, err := os.ReadFile(dir + "/" + mood + ".scled"); err == nil && len(raw) > 0 && len(raw) < 1<<16 {
++		var buf bytes.Buffer
++		zw := gzip.NewWriter(&buf)
++		_, _ = zw.Write(raw)
++		_ = zw.Close()
++		return base64.StdEncoding.EncodeToString(buf.Bytes())
++	}
++	if mood == "joy" || mood == "love" {
++		return cloudSmile
++	}
++	return ""
++}
++
++// emotionDirective draws the emotion on the clock screen the way the cloud does.
 +func emotionDirective(ctx context.Context) *directives.TDirective {
-+	if !envOn("QUASAR_EMOTION_ANIMATION", false) {
++	if !envOn("QUASAR_EMOTION_ANIMATION", true) {
 +		return nil
 +	}
-+	types := map[string]animation.TAnimationCapability_EAnimationType{
-+		"joy": animation.TAnimationCapability_EmotionalJoy, "sad": animation.TAnimationCapability_EmotionalSadness,
-+		"angry": animation.TAnimationCapability_EmotionalAngry, "wow": animation.TAnimationCapability_EmotionalWow,
-+		"love": animation.TAnimationCapability_EmotionalLove,
-+	}
-+	t, ok := types[voiceFrom(ctx).getEmotion()]
-+	if !ok {
++	anim := emotionAnimation(voiceFrom(ctx).getEmotion())
++	if anim == "" {
 +		return nil
 +	}
 +	payload, err := proto.Marshal(&animation.TAnimationCapability_TDrawAnimationDirective{
-+		Name:                "draw_animation",
-+		AnimationStopPolicy: animation.TAnimationCapability_TDrawAnimationDirective_PlayOnceTillEndOfTTS,
++		AnimationStopPolicy: animation.TAnimationCapability_TDrawAnimationDirective_PlayOnce,
 +		Animations: []*animation.TAnimationCapability_TDrawAnimationDirective_TAnimation{{
-+			Value: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TypedAnimation{
-+				TypedAnimation: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TTypedAnimation{Type: t},
++			Value: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_BinaryAnimation{
++				BinaryAnimation: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TBinaryAnimation{
++					Compression:        animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TBinaryAnimation_Gzip,
++					Base64EncodedValue: anim,
++				},
 +			},
 +		}},
 +	})
 +	if err != nil {
 +		return nil
 +	}
-+	return &directives.TDirective{Type: "client_action", Name: "draw_animation_directive", AnalyticsType: "draw_animation_directive", DirectiveType: endpoint.TCapability_DrawAnimationDirectiveType, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
++	return &directives.TDirective{Type: "client_action", Name: "draw_animation_directive", AnalyticsType: "draw_animation_directive", IsLedSilent: true, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
 +}
 +
 +// ---- no obscene language ----
