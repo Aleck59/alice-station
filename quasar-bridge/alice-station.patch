@@ -1,8 +1,16 @@
 diff --git a/internal/bridge/engine.go b/internal/bridge/engine.go
-index a483ccf..ccbd19b 100644
+index a483ccf..4bcb633 100644
 --- a/internal/bridge/engine.go
 +++ b/internal/bridge/engine.go
-@@ -179,6 +179,10 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"encoding/json/v2"
+ 	"errors"
++	"log/slog"
+ 	"quasarbridge/internal/configvoice"
+ 	"quasarbridge/internal/dialogue"
+ 	"strings"
+@@ -179,6 +180,14 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
  		text = webaddress.Normalize(text)
  	}
  	r := Resolution{Route: "llm"}
@@ -10,23 +18,100 @@ index a483ccf..ccbd19b 100644
 +		r.Answer = answer
 +		return r, nil
 +	}
++	if answer, ok := nameCommand(ctx, text); ok {
++		r.Answer = answer
++		return r, nil
++	}
  	if e.LLM == nil && e.Assistant == nil {
  		return r, errors.New("LLM is not configured")
  	}
-@@ -190,7 +194,7 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
+@@ -190,7 +199,7 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
  	if !e.dialogue().Current(ctx, ticket) {
  		return r, context.Canceled
  	}
 -	messages := []llm.Message{{Role: "system", Content: "Ты голосовой помощник пользователя. Отвечай по-русски, кратко и по существу, обычно до трёх предложений. Ответ будет прочитан вслух: без Markdown и служебных рассуждений. Выполняй внешние действия только доступными инструментами по явному запросу пользователя. Не заявляй о выполнении действий без успешного результата инструмента; если инструмента нет, прямо скажи об этом. Для Home Assistant есть отдельный обработчик умного дома."}}
-+	messages := []llm.Message{{Role: "system", Content: "Ты голосовой помощник пользователя. Отвечай по-русски, кратко и по существу, обычно до трёх предложений. Ответ будет прочитан вслух: без Markdown и служебных рассуждений. Выполняй внешние действия только доступными инструментами по явному запросу пользователя. Не заявляй о выполнении действий без успешного результата инструмента; если инструмента нет, прямо скажи об этом. Для Home Assistant есть отдельный обработчик умного дома." + personaSystem()}}
++	messages := []llm.Message{{Role: "system", Content: "Ты голосовой помощник пользователя. Отвечай по-русски, кратко и по существу, обычно до трёх предложений. Ответ будет прочитан вслух: без Markdown и служебных рассуждений. Выполняй внешние действия только доступными инструментами по явному запросу пользователя. Не заявляй о выполнении действий без успешного результата инструмента; если инструмента нет, прямо скажи об этом. Для Home Assistant есть отдельный обработчик умного дома." + personaSystem() + styleSystem(ctx, requestTag(text))}}
  	messages = append(messages, snapshot.Messages...)
  	messages = append(messages, llm.Message{Role: "user", Content: text})
  	messages = e.modelMessages(messages)
+@@ -207,6 +216,20 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
+ 	if !e.dialogue().Current(ctx, ticket) {
+ 		return r, context.Canceled
+ 	}
++	if err == nil {
++		answer = takeEmotion(ctx, answer)
++		if hasMat(answer) {
++			slog.Info("llm_answer_mat_rewrite")
++			if e.LLM != nil {
++				if clean, rerr := e.LLM.Complete(llm.WithoutHostedTools(ctx), []llm.Message{{Role: "system", Content: rewriteNoMat}, {Role: "user", Content: answer}}, false); rerr == nil && strings.TrimSpace(clean) != "" {
++					answer = takeEmotion(ctx, clean)
++				}
++			}
++			if hasMat(answer) {
++				answer = stripMat(answer)
++			}
++		}
++	}
+ 	if err == nil {
+ 		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
+ 			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..aa9344f 100644
+index d26c9d7..836bd6a 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
-@@ -453,6 +453,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -88,6 +88,7 @@ type Native struct {
+ 	tts              map[string]*nativeRequest
+ 	streams          map[uint32]*nativeRequest
+ 	blocked          map[uint32]*nativeRequest
++	mic              map[uint32]*voiceInfo
+ 	wg               sync.WaitGroup
+ 	OnRoute          func(id, route string)
+ 	GateText         bool
+@@ -114,6 +115,16 @@ func (n *Native) Close() {
+ }
+ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byte) error {
+ 	f := wire.Decode(data, wire.ClientToServer)
++	if f.Client == nil && k == websocket.MessageBinary {
++		if sid, ok := streamID(data); ok {
++			n.mu.Lock()
++			v := n.mic[sid]
++			n.mu.Unlock()
++			if v != nil {
++				v.feed(data[4:])
++			}
++		}
++	}
+ 	if f.Client == nil || f.Client.GetEvent() == nil {
+ 		return n.up(ctx, k, data)
+ 	}
+@@ -158,6 +169,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+ 		}
+ 		pctx, cancel := context.WithTimeout(dialogue.WithSpeaker(n.ctx, scope), 90*time.Second)
+ 		pctx = reply.WithPolicy(pctx)
++		voice := newVoiceInfo(id, req)
++		pctx = withVoice(pctx, voice)
+ 		playerState := nativePlaybackState(req)
+ 		pctx = sound.WithPlaybackState(pctx, playerState)
+ 		slog.Info("native_player_state", "request", requestTag(id), "present", playerState.Present, "player_state", playerState.PlayerState, "offset_known", playerState.OffsetKnown, "offset_ms", playerState.OffsetMS, "has_stream", playerState.StreamID != "", "stream_tag", requestTag(playerState.StreamID))
+@@ -207,6 +220,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+ 			}
+ 		})
+ 		n.requests[id] = p
++		if sid := e.GetHeader().GetStreamId(); sid != 0 && !p.isText {
++			if n.mic == nil {
++				n.mic = map[uint32]*voiceInfo{}
++			}
++			for k, v := range n.mic {
++				if time.Since(v.created) > 2*time.Minute {
++					delete(n.mic, k)
++				}
++			}
++			n.mic[uint32(sid)] = voice
++		}
+ 		n.mu.Unlock()
+ 		if p.gated {
+ 			gated, err := wire.EnableApproval(f)
+@@ -453,6 +477,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -34,7 +119,7 @@ index d26c9d7..aa9344f 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -589,6 +590,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -589,6 +614,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -42,6 +127,26 @@ index d26c9d7..aa9344f 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
+@@ -655,6 +681,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+ 		answer.VoiceResponse.OutputSpeech.Text = new("")
+ 	}
+ 	answer.Response.Directives = n.takeSound(p)
++	if d := emotionDirective(p.ctx); d != nil && !silentPlayback {
++		answer.Response.Directives = append(answer.Response.Directives, d)
++	}
+ 	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
+ 	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
+ 	if err != nil {
+@@ -675,7 +704,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+ 	return n.synthesize(p, text)
+ }
+ func (n *Native) synthesize(p *nativeRequest, text string) error {
+-	t := &client.TClientMessage{Message: &client.TClientMessage_Event{Event: &client.TClientMessage_TEvent{Header: &header.TEventHeader{MessageId: p.ttsID}, Event: &client.TClientMessage_TEvent_TtsGenerate{TtsGenerate: &tts.TTtsGenerate{Text: new(text), Lang: new("ru-RU"), Format: new("audio/opus")}}}}}
++	text, volume, emotion := ttsStyle(p.ctx, text)
++	t := &client.TClientMessage{Message: &client.TClientMessage_Event{Event: &client.TClientMessage_TEvent{Header: &header.TEventHeader{MessageId: p.ttsID}, Event: &client.TClientMessage_TEvent_TtsGenerate{TtsGenerate: &tts.TTtsGenerate{Text: new(text), Lang: new("ru-RU"), Format: new("audio/opus"), Volume: volume, Emotion: emotion}}}}}
+ 	b, err := (wire.Frame{Client: t, Prefix: []byte("AAPI")}).Marshal()
+ 	if err != nil {
+ 		return err
 diff --git a/internal/bridge/persona.go b/internal/bridge/persona.go
 new file mode 100644
 index 0000000..dbf9515
@@ -223,6 +328,666 @@ index 0000000..998e782
 +		t.Fatalf("%q", b)
 +	}
 +}
+diff --git a/internal/bridge/silk.go b/internal/bridge/silk.go
+new file mode 100644
+index 0000000..21cde1c
+--- /dev/null
++++ b/internal/bridge/silk.go
+@@ -0,0 +1,284 @@
++package bridge
++
++// Whisper detection from the microphone stream without decoding audio
++// (Alice Station patch).
++//
++// The Station uploads the request audio as Opus. In SILK and Hybrid modes
++// every SILK frame starts with a range-coded frame type (inactive, unvoiced,
++// voiced) and the first gain index (RFC 6716, 4.2.7.3-4.2.7.4). Whispered
++// speech has no vocal-fold vibration, so the encoder marks active frames as
++// unvoiced; normal speech is mostly voiced. Only a few symbols per packet are
++// read, so this costs next to nothing on the speaker CPU.
++
++import (
++	"encoding/binary"
++)
++
++// silkStats summarizes one utterance.
++type silkStats struct {
++	Packets  int // Opus packets seen
++	CELT     int // packets without SILK layer (no voicing information)
++	Inactive int // SILK frames without voice activity
++	Unvoiced int // active unvoiced frames
++	Voiced   int // active voiced frames
++	GainSum  int // sum of first gain indices (0..63) of active frames
++	Skipped  int // packets we could not parse (stereo, code 3, too short)
++}
++
++func (s silkStats) Active() int { return s.Voiced + s.Unvoiced }
++
++// VoicedRatio is the share of voiced frames among active ones.
++func (s silkStats) VoicedRatio() float64 {
++	if s.Active() == 0 {
++		return 1
++	}
++	return float64(s.Voiced) / float64(s.Active())
++}
++
++// MeanGain is the average SILK gain index of active frames (~1.4 dB per step).
++func (s silkStats) MeanGain() float64 {
++	if s.Active() == 0 {
++		return 0
++	}
++	return float64(s.GainSum) / float64(s.Active())
++}
++
++// rangeDec is the minimal Opus range decoder (RFC 6716, 4.1).
++type rangeDec struct {
++	buf      []byte
++	pos      int
++	rng, val uint32
++	rem      uint32
++}
++
++func (d *rangeDec) byte() uint32 {
++	if d.pos < len(d.buf) {
++		b := d.buf[d.pos]
++		d.pos++
++		return uint32(b)
++	}
++	return 0
++}
++func newRangeDec(buf []byte) *rangeDec {
++	d := &rangeDec{buf: buf, rng: 128}
++	d.rem = d.byte()
++	d.val = d.rng - 1 - (d.rem >> 1)
++	d.normalize()
++	return d
++}
++func (d *rangeDec) normalize() {
++	for d.rng <= 1<<23 {
++		d.rng <<= 8
++		sym := d.rem
++		d.rem = d.byte()
++		sym = (sym<<8 | d.rem) >> 1
++		d.val = ((d.val << 8) + (255 &^ sym)) & (1<<31 - 1)
++	}
++}
++func (d *rangeDec) bitLogp(logp uint) bool {
++	r := d.rng
++	v := d.val
++	s := r >> logp
++	ret := v < s
++	if !ret {
++		d.val = v - s
++		d.rng = r - s
++	} else {
++		d.rng = s
++	}
++	d.normalize()
++	return ret
++}
++func (d *rangeDec) icdf(table []uint8, ftb uint) int {
++	s := d.rng
++	v := d.val
++	r := s >> ftb
++	ret := -1
++	var t uint32
++	for {
++		t = s
++		ret++
++		s = r * uint32(table[ret])
++		if v >= s {
++			break
++		}
++	}
++	d.val = v - s
++	d.rng = t - s
++	d.normalize()
++	return ret
++}
++
++// Tables from libopus silk/tables_other.c and silk/tables_gain.c.
++var (
++	silkTypeOffsetVAD   = []uint8{232, 158, 10, 0}
++	silkTypeOffsetNoVAD = []uint8{230, 0}
++	silkLBRRFlags2      = []uint8{203, 150, 0}
++	silkLBRRFlags3      = []uint8{215, 195, 166, 125, 110, 82, 0}
++	silkUniform8        = []uint8{224, 192, 160, 128, 96, 64, 32, 0}
++	silkGain            = [3][]uint8{
++		{224, 112, 44, 15, 3, 2, 1, 0},
++		{254, 237, 192, 132, 70, 23, 4, 0},
++		{255, 252, 226, 155, 61, 11, 2, 0},
++	}
++)
++
++// addOpusPacket inspects the first SILK frame of one Opus packet.
++func (s *silkStats) addOpusPacket(p []byte) {
++	if len(p) < 2 {
++		s.Skipped++
++		return
++	}
++	s.Packets++
++	toc := p[0]
++	config := int(toc >> 3)
++	if config >= 16 {
++		s.CELT++
++		return
++	}
++	if toc&0x04 != 0 { // stereo: the stereo predictor comes first, skip
++		s.Skipped++
++		return
++	}
++	var ms int
++	if config < 12 {
++		ms = []int{10, 20, 40, 60}[config%4]
++	} else {
++		ms = []int{10, 20}[config%2]
++	}
++	frame := p[1:]
++	switch toc & 3 {
++	case 2:
++		if len(frame) < 1 {
++			s.Skipped++
++			return
++		}
++		if frame[0] >= 252 {
++			if len(frame) < 2 {
++				s.Skipped++
++				return
++			}
++			frame = frame[2:]
++		} else {
++			frame = frame[1:]
++		}
++	case 3:
++		s.Skipped++
++		return
++	}
++	if len(frame) < 2 {
++		s.Skipped++
++		return
++	}
++	nFrames := 1
++	if ms == 40 {
++		nFrames = 2
++	} else if ms == 60 {
++		nFrames = 3
++	}
++	d := newRangeDec(frame)
++	vad := make([]bool, nFrames)
++	for i := range vad {
++		vad[i] = d.bitLogp(1)
++	}
++	lbrr := d.bitLogp(1)
++	lbrrFirst := false
++	if lbrr {
++		if nFrames == 1 {
++			lbrrFirst = true
++		} else {
++			table := silkLBRRFlags2
++			if nFrames == 3 {
++				table = silkLBRRFlags3
++			}
++			sym := d.icdf(table, 8) + 1
++			lbrrFirst = sym != 0 // LBRR frames precede the regular ones
++		}
++	}
++	active := lbrrFirst || vad[0]
++	var signal int
++	if active {
++		signal = (d.icdf(silkTypeOffsetVAD, 8) + 2) >> 1
++	} else {
++		signal = d.icdf(silkTypeOffsetNoVAD, 8) >> 1
++	}
++	if signal == 0 {
++		s.Inactive++
++		return
++	}
++	gain := d.icdf(silkGain[signal], 8)<<3 + d.icdf(silkUniform8, 8)
++	s.GainSum += gain
++	if signal == 2 {
++		s.Voiced++
++	} else {
++		s.Unvoiced++
++	}
++}
++
++// micTap collects Opus packets from the uploaded microphone stream. The
++// payload is either raw Opus packets (one per message) or an Ogg stream.
++type micTap struct {
++	ogg     []byte
++	partial []byte
++	isOgg   int // 0 unknown, 1 ogg, 2 raw
++	stats   silkStats
++}
++
++func (m *micTap) feed(b []byte) {
++	if m.isOgg == 0 {
++		if len(b) >= 4 && string(b[:4]) == "OggS" {
++			m.isOgg = 1
++		} else {
++			m.isOgg = 2
++		}
++	}
++	if m.isOgg == 2 {
++		m.stats.addOpusPacket(b)
++		return
++	}
++	if len(m.ogg)+len(b) > 1<<20 {
++		m.ogg = nil
++		return
++	}
++	m.ogg = append(m.ogg, b...)
++	for len(m.ogg) >= 27 {
++		p := m.ogg
++		if string(p[:4]) != "OggS" {
++			m.ogg = nil
++			return
++		}
++		count := int(p[26])
++		if len(p) < 27+count {
++			return
++		}
++		size := 27 + count
++		for _, n := range p[27 : 27+count] {
++			size += int(n)
++		}
++		if len(p) < size {
++			return
++		}
++		body := p[27+count : size]
++		for _, n := range p[27 : 27+count] {
++			m.partial = append(m.partial, body[:n]...)
++			body = body[n:]
++			if n < 255 {
++				pkt := m.partial
++				m.partial = nil
++				if len(pkt) >= 8 && (string(pkt[:8]) == "OpusHead" || string(pkt[:8]) == "OpusTags") {
++					continue
++				}
++				m.stats.addOpusPacket(pkt)
++			}
++		}
++		m.ogg = p[size:]
++	}
++}
++
++// streamID reads the 4-byte stream prefix of a binary uniproxy frame.
++func streamID(data []byte) (uint32, bool) {
++	if len(data) < 4 {
++		return 0, false
++	}
++	return binary.BigEndian.Uint32(data), true
++}
+diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
+new file mode 100644
+index 0000000..596126a
+--- /dev/null
++++ b/internal/bridge/voicestyle.go
+@@ -0,0 +1,364 @@
++package bridge
++
++// Voice style for the LLM route (Alice Station patch): whisper, speaker
++// name by Yandex voice biometry, emotions, no obscene language.
++//
++// Environment (runtime.env), all optional:
++//   QUASAR_WHISPER=0                  disable whisper detection
++//   QUASAR_WHISPER_VOICED_MAX=0.2     voiced share of speech below which it is a whisper
++//   QUASAR_WHISPER_MIN_FRAMES=12      minimum active 20 ms frames to decide
++//   QUASAR_WHISPER_TTS_PREFIX='<speaker is_whisper="true">'   TTS markup for a whispered reply ("-" = none)
++//   QUASAR_WHISPER_TTS_VOLUME=0.5     TtsGenerate.Volume for a whispered reply (0 = not set)
++//   QUASAR_TTS_EMOTION=1              send TtsGenerate.Emotion (good/evil/neutral) from the model's mood tag
++//   QUASAR_EMOTION_ANIMATION=1        add a draw_animation directive (EmotionalJoy, ...) for the clock screen
++//   QUASAR_EMOTION_FILE               default /var/run/alice-emotion ("-" = off), for the LED ring
++//   QUASAR_VOICES_FILE                default /data/opt/quasar-bridge/voices.json (voice id -> name)
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"fmt"
++	"log/slog"
++	"os"
++	"regexp"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	directives "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/directives"
++	request "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/events/alice_request"
++	"github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint"
++	animation "github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint/capabilities/animation"
++	"google.golang.org/protobuf/proto"
++)
++
++// voiceInfo travels with one speaker request in its context.
++type voiceInfo struct {
++	mu      sync.Mutex
++	created time.Time
++	tap     micTap
++	speaker string // stable anonymous voice id from Yandex biometry, "" if unknown
++	emotion string // joy, sad, angry, wow, love, neutral — chosen by the model
++	whisper int    // 0 undecided, 1 whisper, 2 normal
++}
++
++type voiceKey struct{}
++
++func withVoice(ctx context.Context, v *voiceInfo) context.Context {
++	return context.WithValue(ctx, voiceKey{}, v)
++}
++func voiceFrom(ctx context.Context) *voiceInfo {
++	v, _ := ctx.Value(voiceKey{}).(*voiceInfo)
++	return v
++}
++
++func envFloat(name string, def float64) float64 {
++	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64); err == nil {
++		return v
++	}
++	return def
++}
++func envOn(name string, def bool) bool {
++	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
++	case "1", "true", "yes", "on":
++		return true
++	case "0", "false", "no", "off":
++		return false
++	}
++	return def
++}
++
++// newVoiceInfo reads what aliced tells about the speaker. Yandex voice
++// biometry (people added in «Дом с Алисой» → «Голос») arrives as
++// GuestUserOptions with origin VoiceBiometry and status Match.
++func newVoiceInfo(id string, req *request.TAliceRequestProto) *voiceInfo {
++	v := &voiceInfo{created: time.Now()}
++	add := req.GetRequest().GetAdditionalOptions()
++	g := add.GetGuestUserOptions()
++	enrolled := []string{}
++	for _, h := range req.GetEnrollmentHeaders().GetHeaders() {
++		enrolled = append(enrolled, h.GetUserType().String())
++	}
++	if g != nil && g.GetStatus().String() == "Match" && g.GetPersId() != "" {
++		v.speaker = "pers:" + shortHash(g.GetPersId())
++	}
++	bio := req.GetRequest().GetBiometryOptions()
++	slog.Info("native_voice_identity", "request", requestTag(id), "format", req.GetFormat(),
++		"guest", g != nil, "guest_origin", g.GetGuestOrigin().String(), "guest_status", g.GetStatus().String(),
++		"guest_confidence", g.GetMatchConfidence().String(), "owner_enrolled", g.GetIsOwnerEnrolled(),
++		"speaker", v.speaker, "enrolled", strings.Join(enrolled, ","), "users", len(add.GetUsersOptions()),
++		"speakers_count", add.GetSpeakersCount(), "bio_scoring", bio.GetScoring().GetEnabled(),
++		"bio_classification", bio.GetClassification().GetEnabled(), "asr_biometry", req.GetAdvancedAsrOptions().GetBiometry() != "")
++	return v
++}
++
++func shortHash(s string) string {
++	sum := sha256.Sum256([]byte(s))
++	return fmt.Sprintf("%x", sum[:6])
++}
++
++func (v *voiceInfo) feed(b []byte) {
++	v.mu.Lock()
++	v.tap.feed(b)
++	v.mu.Unlock()
++}
++
++// isWhisper decides once per request from the audio seen so far.
++func (v *voiceInfo) isWhisper(id string) bool {
++	if v == nil || !envOn("QUASAR_WHISPER", true) {
++		return false
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	if v.whisper != 0 {
++		return v.whisper == 1
++	}
++	s := v.tap.stats
++	min := int(envFloat("QUASAR_WHISPER_MIN_FRAMES", 12))
++	v.whisper = 2
++	if s.Active() >= min && s.VoicedRatio() <= envFloat("QUASAR_WHISPER_VOICED_MAX", 0.2) {
++		v.whisper = 1
++	}
++	slog.Info("native_whisper", "request", requestTag(id), "whisper", v.whisper == 1, "packets", s.Packets, "celt", s.CELT,
++		"skipped", s.Skipped, "inactive", s.Inactive, "voiced", s.Voiced, "unvoiced", s.Unvoiced,
++		"voiced_ratio", fmt.Sprintf("%.2f", s.VoicedRatio()), "gain", fmt.Sprintf("%.1f", s.MeanGain()))
++	return v.whisper == 1
++}
++
++func (v *voiceInfo) setEmotion(e string) {
++	if v == nil {
++		return
++	}
++	v.mu.Lock()
++	v.emotion = e
++	v.mu.Unlock()
++}
++func (v *voiceInfo) getEmotion() string {
++	if v == nil {
++		return ""
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	return v.emotion
++}
++func (v *voiceInfo) whisperDecided() bool {
++	if v == nil {
++		return false
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	return v.whisper == 1
++}
++
++// ---- speaker names ----
++
++var voicesMu sync.Mutex
++
++func voicesPath() string {
++	return envPath("QUASAR_VOICES_FILE", "/data/opt/quasar-bridge/voices.json")
++}
++func loadVoices() map[string]string {
++	m := map[string]string{}
++	if b, err := os.ReadFile(voicesPath()); err == nil {
++		_ = json.Unmarshal(b, &m)
++	}
++	return m
++}
++func speakerName(id string) string {
++	if id == "" {
++		return ""
++	}
++	voicesMu.Lock()
++	defer voicesMu.Unlock()
++	return loadVoices()[id]
++}
++
++var nameRe = regexp.MustCompile(`^(?:алиса[,\s]+)?(?:запомни(?: мой голос)?[,\s]+)?(?:меня зовут|моё имя|мое имя|зови меня|называй меня)\s+([а-яёa-z][а-яёa-z-]{1,20})[.!\s]*$`)
++
++// nameCommand binds «меня зовут …» to the recognized voice.
++func nameCommand(ctx context.Context, text string) (string, bool) {
++	m := nameRe.FindStringSubmatch(strings.TrimSpace(strings.ToLower(text)))
++	if m == nil {
++		return "", false
++	}
++	name := []rune(m[1])
++	name[0] = []rune(strings.ToUpper(string(name[0])))[0]
++	v := voiceFrom(ctx)
++	if v == nil || v.speaker == "" {
++		return "Приятно познакомиться, " + string(name) + "! Только по голосу я пока людей не различаю: добавьте свой голос в приложении «Дом с Алисой», и тогда я буду вас узнавать.", true
++	}
++	voicesMu.Lock()
++	defer voicesMu.Unlock()
++	all := loadVoices()
++	all[v.speaker] = string(name)
++	b, _ := json.MarshalIndent(all, "", "  ")
++	if err := os.WriteFile(voicesPath(), b, 0o600); err != nil {
++		return "Не получилось запомнить имя.", true
++	}
++	return "Приятно познакомиться, " + string(name) + "! Теперь буду узнавать вас по голосу.", true
++}
++
++// styleSystem is appended to the system prompt for this request.
++func styleSystem(ctx context.Context, id string) string {
++	var b strings.Builder
++	v := voiceFrom(ctx)
++	if v != nil {
++		if name := speakerName(v.speaker); name != "" {
++			b.WriteString("\n\nСейчас говорит " + name + " (узнан(а) по голосу). Можно иногда, к месту, обращаться по имени, но не в каждой реплике.")
++		}
++		if v.isWhisper(id) {
++			b.WriteString("\n\nСобеседник говорит шёпотом — вероятно, рядом кто-то спит. Отвечай очень коротко и спокойно, без восклицаний и встречных вопросов.")
++		}
++	}
++	b.WriteString("\n\nВ самом начале ответа поставь одну метку настроения ответа: [радость], [грусть], [удивление], [злость], [нежность] или [спокойно]. Метка не читается вслух.")
++	return b.String()
++}
++
++var emotionTagRe = regexp.MustCompile(`^\s*\[(радость|грусть|удивление|злость|нежность|спокойно|нейтрально)\]\s*`)
++
++// takeEmotion strips the mood tag from the answer and remembers it.
++func takeEmotion(ctx context.Context, answer string) string {
++	m := emotionTagRe.FindStringSubmatch(answer)
++	if m == nil {
++		// a tag somewhere else must never be read aloud
++		return strings.TrimSpace(emotionAnywhereRe.ReplaceAllString(answer, ""))
++	}
++	e := map[string]string{"радость": "joy", "грусть": "sad", "удивление": "wow", "злость": "angry", "нежность": "love"}[m[1]]
++	if e == "" {
++		e = "neutral"
++	}
++	voiceFrom(ctx).setEmotion(e)
++	writeEmotionFile(e)
++	return strings.TrimSpace(emotionAnywhereRe.ReplaceAllString(answer[len(m[0]):], ""))
++}
++
++var emotionAnywhereRe = regexp.MustCompile(`\[(?:радость|грусть|удивление|злость|нежность|спокойно|нейтрально)\]\s*`)
++
++func writeEmotionFile(e string) {
++	path := envPath("QUASAR_EMOTION_FILE", "/var/run/alice-emotion")
++	if path == "-" {
++		return
++	}
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, []byte(e+"\n"), 0o644); err == nil {
++		_ = os.Rename(tmp, path)
++	}
++}
++
++// ttsStyle fills TtsGenerate options for this request.
++func ttsStyle(ctx context.Context, text string) (string, *float64, *string) {
++	v := voiceFrom(ctx)
++	var volume *float64
++	var emotion *string
++	if v.isWhisper("tts") {
++		prefix := os.Getenv("QUASAR_WHISPER_TTS_PREFIX")
++		if prefix == "" {
++			prefix = `<speaker is_whisper="true">`
++		}
++		if prefix != "-" {
++			text = prefix + text
++		}
++		if vol := envFloat("QUASAR_WHISPER_TTS_VOLUME", 0.5); vol > 0 {
++			volume = &vol
++		}
++		return text, volume, nil
++	}
++	if envOn("QUASAR_TTS_EMOTION", false) {
++		switch v.getEmotion() {
++		case "joy", "love", "wow":
++			s := "good"
++			emotion = &s
++		case "angry":
++			s := "evil"
++			emotion = &s
++		case "sad", "neutral":
++			s := "neutral"
++			emotion = &s
++		}
++	}
++	return text, volume, emotion
++}
++
++// emotionDirective draws the stock emotion animation on the clock screen.
++func emotionDirective(ctx context.Context) *directives.TDirective {
++	if !envOn("QUASAR_EMOTION_ANIMATION", false) {
++		return nil
++	}
++	types := map[string]animation.TAnimationCapability_EAnimationType{
++		"joy": animation.TAnimationCapability_EmotionalJoy, "sad": animation.TAnimationCapability_EmotionalSadness,
++		"angry": animation.TAnimationCapability_EmotionalAngry, "wow": animation.TAnimationCapability_EmotionalWow,
++		"love": animation.TAnimationCapability_EmotionalLove,
++	}
++	t, ok := types[voiceFrom(ctx).getEmotion()]
++	if !ok {
++		return nil
++	}
++	payload, err := proto.Marshal(&animation.TAnimationCapability_TDrawAnimationDirective{
++		Name:                "draw_animation",
++		AnimationStopPolicy: animation.TAnimationCapability_TDrawAnimationDirective_PlayOnceTillEndOfTTS,
++		Animations: []*animation.TAnimationCapability_TDrawAnimationDirective_TAnimation{{
++			Value: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TypedAnimation{
++				TypedAnimation: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TTypedAnimation{Type: t},
++			},
++		}},
++	})
++	if err != nil {
++		return nil
++	}
++	return &directives.TDirective{Type: "client_action", Name: "draw_animation", AnalyticsType: "draw_animation", DirectiveType: endpoint.TCapability_DrawAnimationDirectiveType, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
++}
++
++// ---- no obscene language ----
++
++const matPrefixes = `(?:по|на|за|от|ото|раз|рас|разъ|вы|до|у|при|об|объ|о|пере|под|подъ|въ|съ|недо|ни)?`
++
++var matWordRes = []*regexp.Regexp{
++	regexp.MustCompile(`^` + matPrefixes + `х[уy](?:й|е|ё|я|ю|и)`),
++	regexp.MustCompile(`пизд`),
++	regexp.MustCompile(`^` + matPrefixes + `[её]б(?:а|у|л|н|ё|е|и|ы|т|к|ищ|ну)`),
++	regexp.MustCompile(`^` + matPrefixes + `бля(?:д|т|$)`),
++	regexp.MustCompile(`^` + matPrefixes + `муд(?:ак|ач|ил|оз|охл)`),
++	regexp.MustCompile(`пид[оа]р`),
++	regexp.MustCompile(`долбо[её]б`),
++	regexp.MustCompile(`^залуп`),
++	regexp.MustCompile(`^` + matPrefixes + `дроч`),
++	regexp.MustCompile(`^манд(?:а|ы|е|у|ой|ёнок)$`),
++}
++var wordRe = regexp.MustCompile(`[\p{L}]+`)
++
++// hasMat reports whether text contains Russian obscene words.
++func hasMat(text string) bool {
++	for _, w := range wordRe.FindAllString(strings.ToLower(text), -1) {
++		if matWord(w) {
++			return true
++		}
++	}
++	return false
++}
++func matWord(w string) bool {
++	for _, re := range matWordRes {
++		if re.MatchString(w) {
++			return true
++		}
++	}
++	return false
++}
++
++// stripMat removes obscene words as the last resort.
++func stripMat(text string) string {
++	out := wordRe.ReplaceAllStringFunc(text, func(w string) string {
++		if matWord(strings.ToLower(w)) {
++			return ""
++		}
++		return w
++	})
++	out = regexp.MustCompile(`\s+([,.!?])`).ReplaceAllString(out, "$1")
++	out = regexp.MustCompile(`,(?:\s*,)+`).ReplaceAllString(out, ",")
++	out = regexp.MustCompile(`,\s*([.!?])`).ReplaceAllString(out, "$1")
++	out = regexp.MustCompile(`\s{2,}`).ReplaceAllString(out, " ")
++	return strings.TrimSpace(out)
++}
++
++const rewriteNoMat = "Перепиши ответ голосовой колонки без нецензурной лексики и без грубых ругательств. Сохрани смысл, иронию и остроумие, ответ должен остаться колким, но приличным. Верни только новый текст ответа, без пояснений и без кавычек."
 diff --git a/internal/llm/client.go b/internal/llm/client.go
 index 15a05f2..dedc6c3 100644
 --- a/internal/llm/client.go
