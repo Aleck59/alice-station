@@ -18,6 +18,7 @@ maind рисует кольцо в /dev/fb0 (24×1, RGB), а светодиод�
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -65,6 +66,36 @@ class LogTail:
         self.buf += data
         *done, self.buf = self.buf.split(b"\n")
         return done
+
+
+# Эмоция ответа ассистента (пишет Quasar Bridge): речь ассистента
+# подкрашивается цветом эмоции; neutral/нет файла — цвета темы.
+EMOTION = os.environ.get("QUASAR_EMOTION_FILE", "/var/run/alice-emotion")
+EMOTION_COLORS = {
+    "joy": ((255, 190, 0), (255, 110, 0)),     # тёплый жёлтый → оранжевый
+    "sad": ((0, 60, 255), (60, 0, 180)),       # глубокий синий
+    "wow": ((0, 255, 200), (255, 0, 200)),     # бирюза → маджента
+    "angry": ((255, 0, 0), (255, 60, 0)),      # красный
+    "love": ((255, 0, 90), (255, 120, 180)),   # розовый
+}
+
+
+def emotion_palette():
+    try:
+        if time.time() - os.stat(EMOTION).st_mtime >= ROUTE_TTL:
+            return None
+        with open(EMOTION) as fh:
+            pair = EMOTION_COLORS.get(fh.read(16).strip())
+    except OSError:
+        return None
+    if not pair:
+        return None
+    a, b = pair
+    out = []
+    for i in range(N):
+        t = 0.5 - 0.5 * math.cos(2 * math.pi * i / N)
+        out.append(tuple(round(a[c] + (b[c] - a[c]) * t) for c in range(3)))
+    return out
 
 
 def assistant_route() -> bool:
@@ -155,10 +186,12 @@ def main() -> None:
                 m = SPECTRO.search(ln)
                 if m:
                     voice = m.group(1).endswith(b"voice")
-            stock_now = voice and not assistant_route()
+            assistant = voice and assistant_route()
+            stock_now = voice and not assistant
+            use_pal = (emotion_palette() or pal) if assistant else pal
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
-                vals = recolor(frame, None if stock_now else pal)
+                vals = recolor(frame, None if stock_now else use_pal)
                 # Пишем только изменившиеся каналы (быстро, без задержки кадра),
                 # а раз в 0,5 с — все 72, на случай если контроллер что-то не применил.
                 full = t0 - full_at > 0.5
