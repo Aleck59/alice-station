@@ -149,10 +149,20 @@ BinaryAnimation gzip, PlayOnce) — 19 кадров по 48 байт для се
 
 Мост: модель ставит метку `[радость]`/`[грусть]`/…, мост её вырезает и
 - пишет `joy|sad|wow|angry|love|neutral` в `/var/run/alice-emotion` (кольцо, ringproxy);
-- добавляет в синтез `<speaker voice="emotional_alice.gpu" emotion=…>`: по умолчанию
-  joy/love/wow → calm_happy (другие значения — `QUASAR_TTS_EMOTION_MAP`, после перебора);
-- рисует на часах ту же «улыбку», что облако, для joy/love; свои анимации —
-  `/data/opt/quasar-bridge/emotions/<mood>.scled` (сырые кадры, мост сам сжимает).
+- добавляет в синтез `<speaker voice="emotional_alice.gpu" emotion=…>`: joy/love →
+  calm_happy, sad → sad, wow/angry → energetic. Перебор 2026-11-10: сервер принимает
+  только calm_happy, sad, neutral, energetic (angry, evil, happy, surprised и др. —
+  тайм-аут). Переопределение — `QUASAR_TTS_EMOTION_MAP`;
+- рисует на часах: joy — «улыбка» облака, sad/angry/wow/love — свои картинки
+  (`clock-emotions/gen.py`: грусть со слезой, злые брови, «о-о» с открытым ртом,
+  ^ ^ с сердцебиением двоеточия). Свой файл
+  `/data/opt/quasar-bridge/emotions/<mood>.scled` (сырые кадры) важнее встроенного.
+
+Карта байтов часов (кадр: байт 0 = 0, байты 1–45 яркость, 2 байта мс big-endian):
+цифры 1–4 слева направо, сегменты a–g по 9 байт (1–7, 10–16, 19–25, 28–34),
+точки p1 q1 8 9, p2 q2 17 18, p4 q4 26 27, p5 q5 35 36, градус 37, двоеточие 38 39,
+h1 h2 40 41, m1 m2 42 43, l1 l2 44 45. Проверка кадров на колонке:
+`clock_led_util <файл.txt>` из `clock-emotions/*.txt` (45 чисел + мс в строке).
 Выключение: `QUASAR_TTS_EMOTION=0`, `QUASAR_EMOTION_ANIMATION=0`.
 
 **Без мата.** `persona.txt`: на грубость — остроумно, мат запрещён. Страховка в
