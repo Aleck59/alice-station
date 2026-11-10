@@ -974,17 +974,18 @@ index 0000000..388b396
 +}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..8d3edf8
+index 0000000..3ab15e6
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,514 @@
+@@ -0,0 +1,551 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
 +// name by Yandex voice biometry, emotions, no obscene language.
 +//
 +// Environment (runtime.env), all optional:
-+//   QUASAR_WHISPER=0                  disable whisper detection
++//   QUASAR_WHISPER=0                  disable whisper detection by sound
++//   QUASAR_WHISPER_NIGHT=23:15-06:30  night mode (Moscow): always whisper and short
 +//   QUASAR_WHISPER_VOICED_MAX=0.2     voiced share of speech below which it is a whisper
 +//   QUASAR_WHISPER_MIN_FRAMES=12      minimum active 20 ms frames to decide
 +//   QUASAR_WHISPER_CELT_TILT_MAX=1.5  CELT: low-minus-mid energy (log2) at or below which it is a whisper
@@ -1094,7 +1095,13 @@ index 0000000..8d3edf8
 +
 +// isWhisper decides once per request from the audio seen so far.
 +func (v *voiceInfo) isWhisper(string) bool {
-+	if v == nil || !envOn("QUASAR_WHISPER", true) {
++	if v == nil {
++		return false
++	}
++	if nightMode(time.Now()) {
++		return true
++	}
++	if !envOn("QUASAR_WHISPER", true) {
 +		return false
 +	}
 +	v.mu.Lock()
@@ -1491,6 +1498,36 @@ index 0000000..8d3edf8
 +		}
 +		slog.Info("native_cloud_animation", "name", d.GetName(), "type", d.GetType(), "directive_type", d.GetDirectiveType().String(), "led_silent", d.GetIsLedSilent(), "payload", body)
 +	}
++}
++
++// nightMode: QUASAR_WHISPER_NIGHT="23:15-06:30" (Moscow time) — replies are
++// whispered and short in this window, whatever the detector says.
++func nightMode(now time.Time) bool {
++	spec := strings.TrimSpace(os.Getenv("QUASAR_WHISPER_NIGHT"))
++	from, to, ok := strings.Cut(spec, "-")
++	if !ok {
++		return false
++	}
++	parse := func(t string) (int, bool) {
++		h, m, ok := strings.Cut(strings.TrimSpace(t), ":")
++		hh, e1 := strconv.Atoi(h)
++		mm, e2 := strconv.Atoi(m)
++		if !ok || e1 != nil || e2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
++			return 0, false
++		}
++		return hh*60 + mm, true
++	}
++	a, ok1 := parse(from)
++	b, ok2 := parse(to)
++	if !ok1 || !ok2 || a == b {
++		return false
++	}
++	t := now.In(moscow())
++	cur := t.Hour()*60 + t.Minute()
++	if a < b {
++		return cur >= a && cur < b
++	}
++	return cur >= a || cur < b
 +}
 diff --git a/internal/llm/client.go b/internal/llm/client.go
 index 15a05f2..dedc6c3 100644
