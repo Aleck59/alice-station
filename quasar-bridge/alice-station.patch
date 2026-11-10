@@ -1,8 +1,16 @@
 diff --git a/internal/bridge/engine.go b/internal/bridge/engine.go
-index a483ccf..ccbd19b 100644
+index a483ccf..4bcb633 100644
 --- a/internal/bridge/engine.go
 +++ b/internal/bridge/engine.go
-@@ -179,6 +179,10 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"encoding/json/v2"
+ 	"errors"
++	"log/slog"
+ 	"quasarbridge/internal/configvoice"
+ 	"quasarbridge/internal/dialogue"
+ 	"strings"
+@@ -179,6 +180,14 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
  		text = webaddress.Normalize(text)
  	}
  	r := Resolution{Route: "llm"}
@@ -10,23 +18,144 @@ index a483ccf..ccbd19b 100644
 +		r.Answer = answer
 +		return r, nil
 +	}
++	if answer, ok := nameCommand(ctx, text); ok {
++		r.Answer = answer
++		return r, nil
++	}
  	if e.LLM == nil && e.Assistant == nil {
  		return r, errors.New("LLM is not configured")
  	}
-@@ -190,7 +194,7 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
+@@ -190,7 +199,7 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
  	if !e.dialogue().Current(ctx, ticket) {
  		return r, context.Canceled
  	}
 -	messages := []llm.Message{{Role: "system", Content: "Ты голосовой помощник пользователя. Отвечай по-русски, кратко и по существу, обычно до трёх предложений. Ответ будет прочитан вслух: без Markdown и служебных рассуждений. Выполняй внешние действия только доступными инструментами по явному запросу пользователя. Не заявляй о выполнении действий без успешного результата инструмента; если инструмента нет, прямо скажи об этом. Для Home Assistant есть отдельный обработчик умного дома."}}
-+	messages := []llm.Message{{Role: "system", Content: "Ты голосовой помощник пользователя. Отвечай по-русски, кратко и по существу, обычно до трёх предложений. Ответ будет прочитан вслух: без Markdown и служебных рассуждений. Выполняй внешние действия только доступными инструментами по явному запросу пользователя. Не заявляй о выполнении действий без успешного результата инструмента; если инструмента нет, прямо скажи об этом. Для Home Assistant есть отдельный обработчик умного дома." + personaSystem()}}
++	messages := []llm.Message{{Role: "system", Content: "Ты голосовой помощник пользователя. Отвечай по-русски, кратко и по существу, обычно до трёх предложений. Ответ будет прочитан вслух: без Markdown и служебных рассуждений. Выполняй внешние действия только доступными инструментами по явному запросу пользователя. Не заявляй о выполнении действий без успешного результата инструмента; если инструмента нет, прямо скажи об этом. Для Home Assistant есть отдельный обработчик умного дома." + personaSystem() + styleSystem(ctx, requestTag(text))}}
  	messages = append(messages, snapshot.Messages...)
  	messages = append(messages, llm.Message{Role: "user", Content: text})
  	messages = e.modelMessages(messages)
+@@ -207,6 +216,20 @@ func (e *Engine) Fallback(ctx context.Context, text string) (Resolution, error)
+ 	if !e.dialogue().Current(ctx, ticket) {
+ 		return r, context.Canceled
+ 	}
++	if err == nil {
++		answer = takeEmotion(ctx, answer)
++		if hasMat(answer) {
++			slog.Info("llm_answer_mat_rewrite")
++			if e.LLM != nil {
++				if clean, rerr := e.LLM.Complete(llm.WithoutHostedTools(ctx), []llm.Message{{Role: "system", Content: rewriteNoMat}, {Role: "user", Content: answer}}, false); rerr == nil && strings.TrimSpace(clean) != "" {
++					answer = takeEmotion(ctx, clean)
++				}
++			}
++			if hasMat(answer) {
++				answer = stripMat(answer)
++			}
++		}
++	}
+ 	if err == nil {
+ 		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
+ 			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..aa9344f 100644
+index d26c9d7..650f66b 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
-@@ -453,6 +453,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -88,6 +88,7 @@ type Native struct {
+ 	tts              map[string]*nativeRequest
+ 	streams          map[uint32]*nativeRequest
+ 	blocked          map[uint32]*nativeRequest
++	mic              map[uint32]*voiceInfo
+ 	wg               sync.WaitGroup
+ 	OnRoute          func(id, route string)
+ 	GateText         bool
+@@ -114,10 +115,46 @@ func (n *Native) Close() {
+ }
+ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byte) error {
+ 	f := wire.Decode(data, wire.ClientToServer)
++	if f.Client == nil && k == websocket.MessageBinary {
++		if sid, ok := streamID(data); ok {
++			n.mu.Lock()
++			v := n.mic[sid]
++			n.mu.Unlock()
++			if v != nil {
++				v.feed(data[4:])
++			}
++		}
++	}
+ 	if f.Client == nil || f.Client.GetEvent() == nil {
+ 		return n.up(ctx, k, data)
+ 	}
+ 	e := f.Client.GetEvent()
++	slog.Info("native_client_event", "kind", f.Kind(), "bytes", len(data), "stream", e.GetHeader().GetStreamId(), "ref", requestTag(e.GetHeader().GetRefMessageId()))
++	if mu := e.GetMatchedUser(); mu != nil {
++		n.mu.Lock()
++		var target *nativeRequest
++		for _, id := range []string{e.GetHeader().GetRefMessageId(), mu.GetVoiceInputMessageId()} {
++			if q := n.requests[id]; id != "" && q != nil {
++				target = q
++				break
++			}
++		}
++		if target == nil && mu.GetHeader().GetRequestId() != "" {
++			for _, q := range n.requests {
++				if q.request.GetHeader().GetRequestId() == mu.GetHeader().GetRequestId() {
++					target = q
++					break
++				}
++			}
++		}
++		n.mu.Unlock()
++		if target != nil {
++			voiceFrom(target.ctx).matchedUser(mu)
++		} else {
++			slog.Info("native_matched_user_orphan", "ref", requestTag(e.GetHeader().GetRefMessageId()), "voice_input", requestTag(mu.GetVoiceInputMessageId()))
++			(&voiceInfo{id: "orphan"}).matchedUser(mu)
++		}
++	}
+ 	if stat := e.GetRequestStat(); stat != nil {
+ 		kind := "none"
+ 		raw := strings.ToLower(stat.GetError())
+@@ -158,6 +195,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+ 		}
+ 		pctx, cancel := context.WithTimeout(dialogue.WithSpeaker(n.ctx, scope), 90*time.Second)
+ 		pctx = reply.WithPolicy(pctx)
++		voice := newVoiceInfo(id, req)
++		pctx = withVoice(pctx, voice)
+ 		playerState := nativePlaybackState(req)
+ 		pctx = sound.WithPlaybackState(pctx, playerState)
+ 		slog.Info("native_player_state", "request", requestTag(id), "present", playerState.Present, "player_state", playerState.PlayerState, "offset_known", playerState.OffsetKnown, "offset_ms", playerState.OffsetMS, "has_stream", playerState.StreamID != "", "stream_tag", requestTag(playerState.StreamID))
+@@ -207,6 +246,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+ 			}
+ 		})
+ 		n.requests[id] = p
++		if sid := e.GetHeader().GetStreamId(); sid != 0 && !p.isText {
++			if n.mic == nil {
++				n.mic = map[uint32]*voiceInfo{}
++			}
++			for k, v := range n.mic {
++				if time.Since(v.created) > 2*time.Minute {
++					delete(n.mic, k)
++				}
++			}
++			n.mic[uint32(sid)] = voice
++		}
+ 		n.mu.Unlock()
+ 		if p.gated {
+ 			gated, err := wire.EnableApproval(f)
+@@ -386,8 +436,13 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 		for _, d := range r.GetResponse().GetDirectives() {
+ 			ds = append(ds, d.GetType()+":"+d.GetName())
+ 		}
++		logCloudDirectives(r.GetResponse().GetDirectives())
+ 
+ 		slog.Info("native_cloud_shape", "matched", p != nil, "directives", ds, "cards", len(r.GetResponse().GetCards()), "voice_text_bytes", len(r.GetVoiceResponse().GetOutputSpeech().GetText()))
++		if vt := r.GetVoiceResponse().GetOutputSpeech().GetText(); strings.Contains(vt, "<") || strings.Contains(strings.ToLower(vt), "whisper") {
++			// how the stock cloud marks whisper/emotion in its own replies (markup only, no user text)
++			slog.Info("native_cloud_voice_markup", "tags", cloudMarkup(vt))
++		}
+ 	}
+ 	if p == nil {
+ 		n.mu.Unlock()
+@@ -453,6 +508,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -34,7 +163,25 @@ index d26c9d7..aa9344f 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -589,6 +590,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -497,6 +553,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 		if asr.GetEndOfUtt() {
+ 			p.final = true
+ 			slog.Info("native_asr_final", "request", requestTag(p.id), "hypotheses", len(asr.GetRecognition()), "code", asr.GetResponseCode().String())
++			unknown := len(asr.ProtoReflect().GetUnknown()) + len(e.ProtoReflect().GetUnknown()) + len(e.GetHeader().ProtoReflect().GetUnknown())
++			for _, r := range asr.GetRecognition() {
++				unknown += len(r.ProtoReflect().GetUnknown())
++			}
++			// a whisper flag from Yandex ASR would show up as unknown protobuf fields
++			slog.Info("native_asr_extra", "request", requestTag(p.id), "unknown_bytes", unknown, "unknown_hex", fmt.Sprintf("%x", asr.ProtoReflect().GetUnknown()), "parent_model", func() string {
++				if len(asr.GetRecognition()) > 0 {
++					return asr.GetRecognition()[0].GetParentModel()
++				}
++				return ""
++			}())
+ 		}
+ 		if asr.GetEndOfUtt() && len(asr.GetRecognition()) > 0 {
+ 			r := asr.GetRecognition()[0]
+@@ -589,6 +656,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -42,6 +189,34 @@ index d26c9d7..aa9344f 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
+@@ -612,6 +680,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+ 			}
+ 			n.mu.Unlock()
+ 			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
++			voiceFrom(p.ctx).isWhisper("")
+ 			return
+ 		}
+ 		p.local = true
+@@ -655,6 +724,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+ 		answer.VoiceResponse.OutputSpeech.Text = new("")
+ 	}
+ 	answer.Response.Directives = n.takeSound(p)
++	if d := emotionDirective(p.ctx); d != nil && !silentPlayback {
++		answer.Response.Directives = emotionFirst(d, answer.Response.Directives)
++	}
+ 	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
+ 	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
+ 	if err != nil {
+@@ -675,7 +747,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+ 	return n.synthesize(p, text)
+ }
+ func (n *Native) synthesize(p *nativeRequest, text string) error {
+-	t := &client.TClientMessage{Message: &client.TClientMessage_Event{Event: &client.TClientMessage_TEvent{Header: &header.TEventHeader{MessageId: p.ttsID}, Event: &client.TClientMessage_TEvent_TtsGenerate{TtsGenerate: &tts.TTtsGenerate{Text: new(text), Lang: new("ru-RU"), Format: new("audio/opus")}}}}}
++	text, volume, emotion := ttsStyle(p.ctx, text)
++	t := &client.TClientMessage{Message: &client.TClientMessage_Event{Event: &client.TClientMessage_TEvent{Header: &header.TEventHeader{MessageId: p.ttsID}, Event: &client.TClientMessage_TEvent_TtsGenerate{TtsGenerate: &tts.TTtsGenerate{Text: new(text), Lang: new("ru-RU"), Format: new("audio/opus"), Volume: volume, Emotion: emotion}}}}}
+ 	b, err := (wire.Frame{Client: t, Prefix: []byte("AAPI")}).Marshal()
+ 	if err != nil {
+ 		return err
 diff --git a/internal/bridge/persona.go b/internal/bridge/persona.go
 new file mode 100644
 index 0000000..dbf9515
@@ -222,6 +397,1162 @@ index 0000000..998e782
 +	if b, _ := os.ReadFile(f); string(b) != "alice\n" {
 +		t.Fatalf("%q", b)
 +	}
++}
+diff --git a/internal/bridge/silk.go b/internal/bridge/silk.go
+new file mode 100644
+index 0000000..388b396
+--- /dev/null
++++ b/internal/bridge/silk.go
+@@ -0,0 +1,568 @@
++package bridge
++
++// Whisper detection from the microphone stream without decoding audio
++// (Alice Station patch).
++//
++// The Station uploads the request audio as Opus. In SILK and Hybrid modes
++// every SILK frame starts with a range-coded frame type (inactive, unvoiced,
++// voiced) and the first gain index (RFC 6716, 4.2.7.3-4.2.7.4). Whispered
++// speech has no vocal-fold vibration, so the encoder marks active frames as
++// unvoiced; normal speech is mostly voiced. Only a few symbols per packet are
++// read, so this costs next to nothing on the speaker CPU.
++
++import (
++	"encoding/binary"
++	"sort"
++)
++
++// silkStats summarizes one utterance.
++type silkStats struct {
++	Packets  int // Opus packets seen
++	CELT     int // packets without SILK layer (no voicing information)
++	Inactive int // SILK frames without voice activity
++	Unvoiced int // active unvoiced frames
++	Voiced   int // active voiced frames
++	GainSum  int // sum of first gain indices (0..63) of active frames
++	Skipped  int // packets we could not parse (stereo, code 3, too short)
++	// CELT-only packets: the pitch pre/post-filter is switched on for
++	// periodic (voiced) sound and stays off for noise-like sound (whisper).
++	CELTSilent  int
++	CELTPitched int
++	CELTFlat    int
++	CELTGainSum int // sum of post-filter gain steps (1..8) of pitched frames
++	// Coarse band energies (log2) predicted across frames, and per-frame
++	// level and spectral tilt: voiced speech has strong harmonics below
++	// 600 Hz, whisper is breath noise with almost nothing there.
++	celtE    [21]float64
++	Frames   []celtFrame
++	celtFail int
++}
++
++type celtFrame struct{ Level, Tilt float64 }
++
++// PitchedRatio is the share of non-silent CELT frames with the pitch filter on.
++func (s silkStats) PitchedRatio() float64 {
++	n := s.CELTPitched + s.CELTFlat
++	if n == 0 {
++		return 1
++	}
++	return float64(s.CELTPitched) / float64(n)
++}
++
++func (s silkStats) Active() int { return s.Voiced + s.Unvoiced }
++
++// VoicedRatio is the share of voiced frames among active ones.
++func (s silkStats) VoicedRatio() float64 {
++	if s.Active() == 0 {
++		return 1
++	}
++	return float64(s.Voiced) / float64(s.Active())
++}
++
++// MeanGain is the average SILK gain index of active frames (~1.4 dB per step).
++func (s silkStats) MeanGain() float64 {
++	if s.Active() == 0 {
++		return 0
++	}
++	return float64(s.GainSum) / float64(s.Active())
++}
++
++// rangeDec is the minimal Opus range decoder (RFC 6716, 4.1).
++type rangeDec struct {
++	buf      []byte
++	pos      int
++	rng, val uint32
++	rem      uint32
++	ext      uint32
++	endOffs  int
++	endWin   uint32
++	endBits  int
++	nbits    int
++}
++
++func ilog(x uint32) int {
++	n := 0
++	for x != 0 {
++		n++
++		x >>= 1
++	}
++	return n
++}
++func (d *rangeDec) tell() int { return d.nbits - ilog(d.rng) }
++func (d *rangeDec) decode(ft uint32) uint32 {
++	d.ext = d.rng / ft
++	s := d.val / d.ext
++	return ft - min(s+1, ft)
++}
++func (d *rangeDec) update(fl, fh, ft uint32) {
++	s := d.ext * (ft - fh)
++	d.val -= s
++	if fl > 0 {
++		d.rng = d.ext * (fh - fl)
++	} else {
++		d.rng -= s
++	}
++	d.normalize()
++}
++
++// uintSmall decodes ec_dec_uint for ft <= 256.
++func (d *rangeDec) uintSmall(ft uint32) uint32 {
++	s := d.decode(ft)
++	d.update(s, s+1, ft)
++	return s
++}
++func (d *rangeDec) bits(n int) uint32 {
++	w := d.endWin
++	avail := d.endBits
++	if avail < n {
++		for avail <= 32-8 {
++			var b uint32
++			if d.endOffs < len(d.buf) {
++				d.endOffs++
++				b = uint32(d.buf[len(d.buf)-d.endOffs])
++			}
++			w |= b << avail
++			avail += 8
++		}
++	}
++	ret := w & (1<<n - 1)
++	d.endWin = w >> n
++	d.endBits = avail - n
++	d.nbits += n
++	return ret
++}
++
++func (d *rangeDec) byte() uint32 {
++	if d.pos < len(d.buf) {
++		b := d.buf[d.pos]
++		d.pos++
++		return uint32(b)
++	}
++	return 0
++}
++func newRangeDec(buf []byte) *rangeDec {
++	d := &rangeDec{buf: buf, rng: 128, nbits: 9}
++	d.rem = d.byte()
++	d.val = d.rng - 1 - (d.rem >> 1)
++	d.normalize()
++	return d
++}
++func (d *rangeDec) normalize() {
++	for d.rng <= 1<<23 {
++		d.nbits += 8
++		d.rng <<= 8
++		sym := d.rem
++		d.rem = d.byte()
++		sym = (sym<<8 | d.rem) >> 1
++		d.val = ((d.val << 8) + (255 &^ sym)) & (1<<31 - 1)
++	}
++}
++func (d *rangeDec) bitLogp(logp uint) bool {
++	r := d.rng
++	v := d.val
++	s := r >> logp
++	ret := v < s
++	if !ret {
++		d.val = v - s
++		d.rng = r - s
++	} else {
++		d.rng = s
++	}
++	d.normalize()
++	return ret
++}
++func (d *rangeDec) icdf(table []uint8, ftb uint) int {
++	s := d.rng
++	v := d.val
++	r := s >> ftb
++	ret := -1
++	var t uint32
++	for {
++		t = s
++		ret++
++		s = r * uint32(table[ret])
++		if v >= s {
++			break
++		}
++	}
++	d.val = v - s
++	d.rng = t - s
++	d.normalize()
++	return ret
++}
++
++// Tables from libopus silk/tables_other.c and silk/tables_gain.c.
++var (
++	silkTypeOffsetVAD   = []uint8{232, 158, 10, 0}
++	silkTypeOffsetNoVAD = []uint8{230, 0}
++	silkLBRRFlags2      = []uint8{203, 150, 0}
++	silkLBRRFlags3      = []uint8{215, 195, 166, 125, 110, 82, 0}
++	silkUniform8        = []uint8{224, 192, 160, 128, 96, 64, 32, 0}
++	silkGain            = [3][]uint8{
++		{224, 112, 44, 15, 3, 2, 1, 0},
++		{254, 237, 192, 132, 70, 23, 4, 0},
++		{255, 252, 226, 155, 61, 11, 2, 0},
++	}
++)
++
++// addOpusPacket inspects the first SILK frame of one Opus packet.
++func (s *silkStats) addOpusPacket(p []byte) {
++	if len(p) < 2 {
++		s.Skipped++
++		return
++	}
++	s.Packets++
++	toc := p[0]
++	config := int(toc >> 3)
++	if config >= 16 {
++		s.CELT++
++		s.addCELT(p)
++		return
++	}
++	if toc&0x04 != 0 { // stereo: the stereo predictor comes first, skip
++		s.Skipped++
++		return
++	}
++	var ms int
++	if config < 12 {
++		ms = []int{10, 20, 40, 60}[config%4]
++	} else {
++		ms = []int{10, 20}[config%2]
++	}
++	frame := p[1:]
++	switch toc & 3 {
++	case 2:
++		if len(frame) < 1 {
++			s.Skipped++
++			return
++		}
++		if frame[0] >= 252 {
++			if len(frame) < 2 {
++				s.Skipped++
++				return
++			}
++			frame = frame[2:]
++		} else {
++			frame = frame[1:]
++		}
++	case 3:
++		s.Skipped++
++		return
++	}
++	if len(frame) < 2 {
++		s.Skipped++
++		return
++	}
++	nFrames := 1
++	if ms == 40 {
++		nFrames = 2
++	} else if ms == 60 {
++		nFrames = 3
++	}
++	d := newRangeDec(frame)
++	vad := make([]bool, nFrames)
++	for i := range vad {
++		vad[i] = d.bitLogp(1)
++	}
++	lbrr := d.bitLogp(1)
++	lbrrFirst := false
++	if lbrr {
++		if nFrames == 1 {
++			lbrrFirst = true
++		} else {
++			table := silkLBRRFlags2
++			if nFrames == 3 {
++				table = silkLBRRFlags3
++			}
++			sym := d.icdf(table, 8) + 1
++			lbrrFirst = sym != 0 // LBRR frames precede the regular ones
++		}
++	}
++	active := lbrrFirst || vad[0]
++	var signal int
++	if active {
++		signal = (d.icdf(silkTypeOffsetVAD, 8) + 2) >> 1
++	} else {
++		signal = d.icdf(silkTypeOffsetNoVAD, 8) >> 1
++	}
++	if signal == 0 {
++		s.Inactive++
++		return
++	}
++	gain := d.icdf(silkGain[signal], 8)<<3 + d.icdf(silkUniform8, 8)
++	s.GainSum += gain
++	if signal == 2 {
++		s.Voiced++
++	} else {
++		s.Unvoiced++
++	}
++}
++
++// micTap collects Opus packets from the uploaded microphone stream. The
++// payload is either raw Opus packets (one per message) or an Ogg stream.
++type micTap struct {
++	ogg     []byte
++	partial []byte
++	isOgg   int // 0 unknown, 1 ogg, 2 raw
++	stats   silkStats
++}
++
++func (m *micTap) feed(b []byte) {
++	if m.isOgg == 0 {
++		if len(b) >= 4 && string(b[:4]) == "OggS" {
++			m.isOgg = 1
++		} else {
++			m.isOgg = 2
++		}
++	}
++	if m.isOgg == 2 {
++		m.stats.addOpusPacket(b)
++		return
++	}
++	if len(m.ogg)+len(b) > 1<<20 {
++		m.ogg = nil
++		return
++	}
++	m.ogg = append(m.ogg, b...)
++	for len(m.ogg) >= 27 {
++		p := m.ogg
++		if string(p[:4]) != "OggS" {
++			m.ogg = nil
++			return
++		}
++		count := int(p[26])
++		if len(p) < 27+count {
++			return
++		}
++		size := 27 + count
++		for _, n := range p[27 : 27+count] {
++			size += int(n)
++		}
++		if len(p) < size {
++			return
++		}
++		body := p[27+count : size]
++		for _, n := range p[27 : 27+count] {
++			m.partial = append(m.partial, body[:n]...)
++			body = body[n:]
++			if n < 255 {
++				pkt := m.partial
++				m.partial = nil
++				if len(pkt) >= 8 && (string(pkt[:8]) == "OpusHead" || string(pkt[:8]) == "OpusTags") {
++					continue
++				}
++				m.stats.addOpusPacket(pkt)
++			}
++		}
++		m.ogg = p[size:]
++	}
++}
++
++// streamID reads the 4-byte stream prefix of a binary uniproxy frame.
++func streamID(data []byte) (uint32, bool) {
++	if len(data) < 4 {
++		return 0, false
++	}
++	return binary.BigEndian.Uint32(data), true
++}
++
++// firstFrame returns the exact bytes of the first frame (RFC 6716, 3.2).
++func firstFrame(p []byte) []byte {
++	if len(p) < 2 {
++		return nil
++	}
++	rest := p[1:]
++	switch p[0] & 3 {
++	case 0:
++		return rest
++	case 1:
++		if len(rest)%2 != 0 {
++			return nil
++		}
++		return rest[:len(rest)/2]
++	case 2:
++		n := int(rest[0])
++		hdr := 1
++		if n >= 252 {
++			if len(rest) < 2 {
++				return nil
++			}
++			n += 4 * int(rest[1])
++			hdr = 2
++		}
++		if len(rest) < hdr+n {
++			return nil
++		}
++		return rest[hdr : hdr+n]
++	default:
++		m := int(rest[0] & 0x3f)
++		if m == 0 || rest[0]&0xc0 != 0 { // VBR or padding: not needed for the Station stream
++			return nil
++		}
++		body := rest[1:]
++		if len(body)%m != 0 {
++			return nil
++		}
++		return body[:len(body)/m]
++	}
++}
++
++// addCELT reads the silence flag and the pitch post-filter flag of the
++// first CELT frame (RFC 6716, 4.3 and libopus celt_decode_with_ec).
++func (s *silkStats) addCELT(p []byte) {
++	f := firstFrame(p)
++	if len(f) < 3 {
++		s.Skipped++
++		return
++	}
++	if p[0]&0x04 != 0 { // stereo is fine: the post-filter comes before channel data
++	}
++	total := len(f) * 8
++	d := newRangeDec(f)
++	if d.tell() >= total || (d.tell() == 1 && d.bitLogp(15)) {
++		s.CELTSilent++
++		return
++	}
++	if d.tell()+16 > total {
++		s.Skipped++
++		return
++	}
++	if d.bitLogp(1) {
++		octave := d.uintSmall(6)
++		_ = d.bits(int(4 + octave))
++		qg := d.bits(3)
++		if d.tell()+2 <= total {
++			d.icdf([]uint8{2, 1, 0}, 2)
++		}
++		s.CELTPitched++
++		s.CELTGainSum += int(qg) + 1
++	} else {
++		s.CELTFlat++
++	}
++	if p[0]&0x04 != 0 {
++		return // stereo energies interleave channels; the Station mic is mono
++	}
++	config := int(p[0] >> 3)
++	lm := config % 4 // 2.5, 5, 10, 20 ms
++	end := []int{13, 17, 19, 21}[(config-16)/4]
++	if lm > 0 && d.tell()+3 <= total {
++		d.bitLogp(3) // transient
++	}
++	intra := false
++	if d.tell()+3 <= total {
++		intra = d.bitLogp(3)
++	}
++	s.coarseEnergy(d, total, lm, end, intra)
++}
++
++var (
++	celtPredCoef = [4]float64{29440 / 32768., 26112 / 32768., 21248 / 32768., 16384 / 32768.}
++	celtBetaCoef = [4]float64{30147 / 32768., 22282 / 32768., 12124 / 32768., 6554 / 32768.}
++	celtEMeans   = [21]float64{6.4375, 6.25, 5.75, 5.3125, 5.0625, 4.8125, 4.5, 4.375, 4.875, 4.6875,
++		4.5625, 4.4375, 4.875, 4.625, 4.3125, 4.5, 4.375, 4.625, 4.75, 4.4375, 3.75}
++	// e_prob_model from libopus celt/quant_bands.c: [LM][intra][2*band]
++	celtProbModel = [4][2][42]uint8{
++		{{72, 127, 65, 129, 66, 128, 65, 128, 64, 128, 62, 128, 64, 128, 64, 128, 92, 78, 92, 79, 92, 78, 90, 79, 116, 41, 115, 40, 114, 40, 132, 26, 132, 26, 145, 17, 161, 12, 176, 10, 177, 11},
++			{24, 179, 48, 138, 54, 135, 54, 132, 53, 134, 56, 133, 55, 132, 55, 132, 61, 114, 70, 96, 74, 88, 75, 88, 87, 74, 89, 66, 91, 67, 100, 59, 108, 50, 120, 40, 122, 37, 97, 43, 78, 50}},
++		{{83, 78, 84, 81, 88, 75, 86, 74, 87, 71, 90, 73, 93, 74, 93, 74, 109, 40, 114, 36, 117, 34, 117, 34, 143, 17, 145, 18, 146, 19, 162, 12, 165, 10, 178, 7, 189, 6, 190, 8, 177, 9},
++			{23, 178, 54, 115, 63, 102, 66, 98, 69, 99, 74, 89, 71, 91, 73, 91, 78, 89, 86, 80, 92, 66, 93, 64, 102, 59, 103, 60, 104, 60, 117, 52, 123, 44, 138, 35, 133, 31, 97, 38, 77, 45}},
++		{{61, 90, 93, 60, 105, 42, 107, 41, 110, 45, 116, 38, 113, 38, 112, 38, 124, 26, 132, 27, 136, 19, 140, 20, 155, 14, 159, 16, 158, 18, 170, 13, 177, 10, 187, 8, 192, 6, 175, 9, 159, 10},
++			{21, 178, 59, 110, 71, 86, 75, 85, 84, 83, 91, 66, 88, 73, 87, 72, 92, 75, 98, 72, 105, 58, 107, 54, 115, 52, 114, 55, 112, 56, 129, 51, 132, 40, 150, 33, 140, 29, 98, 35, 77, 42}},
++		{{42, 121, 96, 66, 108, 43, 111, 40, 117, 44, 123, 32, 120, 36, 119, 33, 127, 33, 134, 34, 139, 21, 147, 23, 152, 20, 158, 25, 154, 26, 166, 21, 173, 16, 184, 13, 184, 10, 150, 13, 139, 15},
++			{22, 178, 63, 114, 74, 82, 84, 83, 92, 82, 103, 62, 96, 72, 96, 67, 101, 73, 107, 72, 113, 55, 118, 52, 125, 52, 118, 52, 117, 55, 135, 49, 137, 39, 157, 32, 145, 29, 97, 33, 77, 40}},
++	}
++)
++
++func (d *rangeDec) decodeBin(bits uint) uint32 {
++	d.ext = d.rng >> bits
++	s := d.val / d.ext
++	return 1<<bits - min(s+1, 1<<bits)
++}
++
++// laplace is ec_laplace_decode from libopus celt/laplace.c.
++func (d *rangeDec) laplace(fs uint32, decay uint32) int {
++	const minp = 1
++	const nmin = 16
++	val := 0
++	fm := d.decodeBin(15)
++	var fl uint32
++	if fm >= fs {
++		val++
++		fl = fs
++		fs = ((32768-minp*2*nmin-fs)*(16384-decay))>>15 + minp
++		for fs > minp && fm >= fl+2*fs {
++			fs *= 2
++			fl += fs
++			fs = ((fs - 2*minp) * decay) >> 15
++			fs += minp
++			val++
++		}
++		if fs <= minp {
++			di := (fm - fl) >> 1
++			val += int(di)
++			fl += 2 * di * minp
++		}
++		if fm < fl+fs {
++			val = -val
++		} else {
++			fl += fs
++		}
++	}
++	d.update(fl, min(fl+fs, 32768), 32768)
++	return val
++}
++
++func (s *silkStats) coarseEnergy(d *rangeDec, total, lm, end int, intra bool) {
++	coef, beta := celtPredCoef[lm], celtBetaCoef[lm]
++	model := celtProbModel[lm][0]
++	if intra {
++		coef, beta = 0, 4915/32768.
++		model = celtProbModel[lm][1]
++	}
++	prev := 0.0
++	for i := 0; i < end; i++ {
++		var qi int
++		left := total - d.tell()
++		switch {
++		case left >= 15:
++			pi := 2 * min(i, 20)
++			qi = d.laplace(uint32(model[pi])<<7, uint32(model[pi+1])<<6)
++		case left >= 2:
++			v := d.icdf([]uint8{2, 1, 0}, 2)
++			qi = (v >> 1) ^ -(v & 1)
++		case left >= 1:
++			if d.bitLogp(1) {
++				qi = -1
++			}
++		default:
++			qi = -1
++		}
++		q := float64(qi)
++		old := max(-9, s.celtE[i])
++		s.celtE[i] = coef*old + prev + q
++		prev = prev + q - beta*q
++	}
++	abs := func(i int) float64 { return s.celtE[i] + celtEMeans[i] }
++	low := (abs(0) + abs(1) + abs(2)) / 3
++	mid := (abs(8) + abs(9) + abs(10) + abs(11) + abs(12)) / 5
++	level := 0.0
++	for i := 0; i < 13; i++ {
++		level = max(level, abs(i))
++	}
++	if len(s.Frames) < 1500 {
++		s.Frames = append(s.Frames, celtFrame{Level: level, Tilt: low - mid})
++	}
++}
++
++// CELTTilt returns the median low-minus-mid band energy (log2 units, 1 = 6 dB)
++// over the loudest 30% of frames, and how many frames it used.
++func (s silkStats) CELTTilt() (float64, int) {
++	if len(s.Frames) == 0 {
++		return 0, 0
++	}
++	fs := append([]celtFrame(nil), s.Frames...)
++	sort.Slice(fs, func(i, j int) bool { return fs[i].Level > fs[j].Level })
++	fs = fs[:max(1, len(fs)*3/10)]
++	sort.Slice(fs, func(i, j int) bool { return fs[i].Tilt < fs[j].Tilt })
++	return fs[len(fs)/2].Tilt, len(fs)
++}
+diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
+new file mode 100644
+index 0000000..0f675e3
+--- /dev/null
++++ b/internal/bridge/voicestyle.go
+@@ -0,0 +1,576 @@
++package bridge
++
++// Voice style for the LLM route (Alice Station patch): whisper, speaker
++// name by Yandex voice biometry, emotions, no obscene language.
++//
++// Environment (runtime.env), all optional:
++//   QUASAR_WHISPER=0                  disable whisper detection by sound
++//   QUASAR_WHISPER_NIGHT=23:15-06:30  night mode (Moscow): always whisper and short
++//   QUASAR_WHISPER_VOICED_MAX=0.2     voiced share of speech below which it is a whisper
++//   QUASAR_WHISPER_MIN_FRAMES=12      minimum active 20 ms frames to decide
++//   QUASAR_WHISPER_CELT_TILT_MAX=1.5  CELT: low-minus-mid energy (log2) at or below which it is a whisper
++//   QUASAR_WHISPER_TTS_PREFIX='<speaker is_whisper="true">'   TTS markup for a whispered reply ("-" = none)
++//   QUASAR_WHISPER_TTS_VOLUME=0.5     TtsGenerate.Volume for a whispered reply (0 = not set)
++//   QUASAR_TTS_EMOTION=0              no emotional voice (<speaker voice="emotional_alice.gpu" emotion=...>)
++//   QUASAR_TTS_EMOTION_MAP            mood=emotion list, default joy/love/wow=calm_happy
++//   QUASAR_EMOTION_ANIMATION=0        no clock animation (draw_animation_directive, BinaryAnimation)
++//   QUASAR_EMOTIONS_DIR               own clock animations <mood>.scled, default /data/opt/quasar-bridge/emotions
++//   QUASAR_EMOTION_FILE               default /var/run/alice-emotion ("-" = off), for the LED ring
++//   QUASAR_VOICES_FILE                default /data/opt/quasar-bridge/voices.json (voice id -> name)
++
++import (
++	"bytes"
++	"compress/gzip"
++	"context"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"log/slog"
++	"os"
++	"regexp"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	directives "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/directives"
++	request "github.com/freequasar/quasar-go-genproto/proto/alice/protos/api/alicekit/events/alice_request"
++	animation "github.com/freequasar/quasar-go-genproto/proto/alice/protos/endpoint/capabilities/animation"
++	"google.golang.org/protobuf/encoding/protojson"
++	"google.golang.org/protobuf/proto"
++)
++
++// voiceInfo travels with one speaker request in its context.
++type voiceInfo struct {
++	mu      sync.Mutex
++	id      string
++	created time.Time
++	tap     micTap
++	speaker string // stable anonymous voice id from Yandex biometry, "" if unknown
++	emotion string // joy, sad, angry, wow, love, neutral — chosen by the model
++	whisper int    // 0 undecided, 1 whisper, 2 normal
++}
++
++type voiceKey struct{}
++
++func withVoice(ctx context.Context, v *voiceInfo) context.Context {
++	return context.WithValue(ctx, voiceKey{}, v)
++}
++func voiceFrom(ctx context.Context) *voiceInfo {
++	v, _ := ctx.Value(voiceKey{}).(*voiceInfo)
++	return v
++}
++
++func envFloat(name string, def float64) float64 {
++	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64); err == nil {
++		return v
++	}
++	return def
++}
++func envOn(name string, def bool) bool {
++	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
++	case "1", "true", "yes", "on":
++		return true
++	case "0", "false", "no", "off":
++		return false
++	}
++	return def
++}
++
++// newVoiceInfo reads what aliced tells about the speaker. Yandex voice
++// biometry (people added in «Дом с Алисой» → «Голос») arrives as
++// GuestUserOptions with origin VoiceBiometry and status Match.
++func newVoiceInfo(id string, req *request.TAliceRequestProto) *voiceInfo {
++	v := &voiceInfo{id: requestTag(id), created: time.Now()}
++	add := req.GetRequest().GetAdditionalOptions()
++	g := add.GetGuestUserOptions()
++	enrolled := []string{}
++	for _, h := range req.GetEnrollmentHeaders().GetHeaders() {
++		enrolled = append(enrolled, h.GetUserType().String())
++	}
++	if g != nil && g.GetStatus().String() == "Match" && g.GetPersId() != "" {
++		v.speaker = "pers:" + shortHash(g.GetPersId())
++	}
++	bio := req.GetRequest().GetBiometryOptions()
++	slog.Info("native_voice_identity", "request", requestTag(id), "format", req.GetFormat(),
++		"guest", g != nil, "guest_origin", g.GetGuestOrigin().String(), "guest_status", g.GetStatus().String(),
++		"guest_confidence", g.GetMatchConfidence().String(), "owner_enrolled", g.GetIsOwnerEnrolled(),
++		"speaker", v.speaker, "enrolled", strings.Join(enrolled, ","), "users", len(add.GetUsersOptions()),
++		"speakers_count", add.GetSpeakersCount(), "bio_scoring", bio.GetScoring().GetEnabled(),
++		"bio_classification", bio.GetClassification().GetEnabled(), "asr_biometry", req.GetAdvancedAsrOptions().GetBiometry() != "")
++	return v
++}
++
++func shortHash(s string) string {
++	sum := sha256.Sum256([]byte(s))
++	return fmt.Sprintf("%x", sum[:6])
++}
++
++func (v *voiceInfo) feed(b []byte) {
++	v.mu.Lock()
++	v.tap.feed(b)
++	v.mu.Unlock()
++}
++
++// isWhisper decides once per request from the audio seen so far.
++func (v *voiceInfo) isWhisper(string) bool {
++	if v == nil {
++		return false
++	}
++	if nightMode(time.Now()) {
++		return true
++	}
++	if !envOn("QUASAR_WHISPER", true) {
++		return false
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	if v.whisper != 0 {
++		return v.whisper == 1
++	}
++	s := v.tap.stats
++	min := int(envFloat("QUASAR_WHISPER_MIN_FRAMES", 12))
++	v.whisper = 2
++	celtFrames := s.CELTPitched + s.CELTFlat
++	celtGain := 0.0
++	if celtFrames > 0 {
++		celtGain = float64(s.CELTGainSum) / float64(celtFrames)
++	}
++	if s.Active() >= min {
++		if s.VoicedRatio() <= envFloat("QUASAR_WHISPER_VOICED_MAX", 0.2) {
++			v.whisper = 1
++		}
++	} else if tilt, n := s.CELTTilt(); n >= min && tilt <= envFloat("QUASAR_WHISPER_CELT_TILT_MAX", 1.5) {
++		// CELT (the Station mic): low (0-600 Hz) minus mid (1.6-4 kHz) band
++		// energy of the loudest frames, log2 units (1 = 6 dB). Voiced speech
++		// has strong harmonics low, whisper is breath noise without them.
++		v.whisper = 1
++	}
++	tilt, tiltFrames := s.CELTTilt()
++	slog.Info("native_whisper", "request", v.id, "whisper", v.whisper == 1, "packets", s.Packets, "celt", s.CELT,
++		"skipped", s.Skipped, "inactive", s.Inactive, "voiced", s.Voiced, "unvoiced", s.Unvoiced,
++		"voiced_ratio", fmt.Sprintf("%.2f", s.VoicedRatio()), "gain", fmt.Sprintf("%.1f", s.MeanGain()),
++		"celt_silent", s.CELTSilent, "celt_pitched", s.CELTPitched, "celt_flat", s.CELTFlat,
++		"celt_pitched_ratio", fmt.Sprintf("%.2f", s.PitchedRatio()), "celt_pitch_gain", fmt.Sprintf("%.2f", celtGain),
++		"celt_tilt", fmt.Sprintf("%.2f", tilt), "celt_tilt_frames", tiltFrames)
++	return v.whisper == 1
++}
++
++func (v *voiceInfo) setEmotion(e string) {
++	if v == nil {
++		return
++	}
++	v.mu.Lock()
++	v.emotion = e
++	v.mu.Unlock()
++}
++func (v *voiceInfo) getEmotion() string {
++	if v == nil {
++		return ""
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	return v.emotion
++}
++func (v *voiceInfo) whisperDecided() bool {
++	if v == nil {
++		return false
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	return v.whisper == 1
++}
++
++// ---- speaker names ----
++
++var voicesMu sync.Mutex
++
++func voicesPath() string {
++	return envPath("QUASAR_VOICES_FILE", "/data/opt/quasar-bridge/voices.json")
++}
++func loadVoices() map[string]string {
++	m := map[string]string{}
++	if b, err := os.ReadFile(voicesPath()); err == nil {
++		_ = json.Unmarshal(b, &m)
++	}
++	return m
++}
++func (v *voiceInfo) speakerID() string {
++	if v == nil {
++		return ""
++	}
++	v.mu.Lock()
++	defer v.mu.Unlock()
++	return v.speaker
++}
++
++func speakerName(id string) string {
++	if id == "" {
++		return ""
++	}
++	voicesMu.Lock()
++	defer voicesMu.Unlock()
++	return loadVoices()[id]
++}
++
++var nameRe = regexp.MustCompile(`^(?:алиса[,\s]+)?(?:запомни(?: мой голос)?[,\s]+)?(?:меня зовут|моё имя|мое имя|зови меня|называй меня)\s+([а-яёa-z][а-яёa-z-]{1,20})[.!\s]*$`)
++
++// nameCommand binds «меня зовут …» to the recognized voice.
++func nameCommand(ctx context.Context, text string) (string, bool) {
++	m := nameRe.FindStringSubmatch(strings.TrimSpace(strings.ToLower(text)))
++	if m == nil {
++		return "", false
++	}
++	name := []rune(m[1])
++	name[0] = []rune(strings.ToUpper(string(name[0])))[0]
++	v := voiceFrom(ctx)
++	if v == nil || v.speakerID() == "" {
++		return "Приятно познакомиться, " + string(name) + "! Только по голосу я пока людей не различаю: добавьте свой голос в приложении «Дом с Алисой», и тогда я буду вас узнавать.", true
++	}
++	voicesMu.Lock()
++	defer voicesMu.Unlock()
++	all := loadVoices()
++	all[v.speakerID()] = string(name)
++	b, _ := json.MarshalIndent(all, "", "  ")
++	if err := os.WriteFile(voicesPath(), b, 0o600); err != nil {
++		return "Не получилось запомнить имя.", true
++	}
++	return "Приятно познакомиться, " + string(name) + "! Теперь буду узнавать вас по голосу.", true
++}
++
++// styleSystem is appended to the system prompt for this request.
++func styleSystem(ctx context.Context, id string) string {
++	var b strings.Builder
++	v := voiceFrom(ctx)
++	if v != nil {
++		if name := speakerName(v.speakerID()); name != "" {
++			b.WriteString("\n\nСейчас говорит " + name + " (узнан(а) по голосу). Можно иногда, к месту, обращаться по имени, но не в каждой реплике.")
++		}
++		if v.isWhisper(id) {
++			b.WriteString("\n\nСобеседник говорит шёпотом — вероятно, рядом кто-то спит. Отвечай коротко, одним-двумя предложениями, мягко и спокойно, без восклицаний и встречных вопросов. Это правило важнее указаний о длине ответа.")
++		}
++	}
++	b.WriteString("\n\nВ самом начале ответа поставь одну метку настроения ответа: [радость], [грусть], [удивление], [злость], [нежность] или [спокойно]. Метка не читается вслух.")
++	return b.String()
++}
++
++var emotionTagRe = regexp.MustCompile(`^\s*\[(радость|грусть|удивление|злость|нежность|спокойно|нейтрально)\]\s*`)
++
++// takeEmotion strips the mood tag from the answer and remembers it.
++func takeEmotion(ctx context.Context, answer string) string {
++	m := emotionTagRe.FindStringSubmatch(answer)
++	if m == nil {
++		// a tag somewhere else must never be read aloud
++		return strings.TrimSpace(emotionAnywhereRe.ReplaceAllString(answer, ""))
++	}
++	e := map[string]string{"радость": "joy", "грусть": "sad", "удивление": "wow", "злость": "angry", "нежность": "love"}[m[1]]
++	if e == "" {
++		e = "neutral"
++	}
++	voiceFrom(ctx).setEmotion(e)
++	writeEmotionFile(e)
++	return strings.TrimSpace(emotionAnywhereRe.ReplaceAllString(answer[len(m[0]):], ""))
++}
++
++var emotionAnywhereRe = regexp.MustCompile(`\[(?:радость|грусть|удивление|злость|нежность|спокойно|нейтрально)\]\s*`)
++
++func writeEmotionFile(e string) {
++	path := envPath("QUASAR_EMOTION_FILE", "/var/run/alice-emotion")
++	if path == "-" {
++		return
++	}
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, []byte(e+"\n"), 0o644); err == nil {
++		_ = os.Rename(tmp, path)
++	}
++}
++
++// ttsStyle fills TtsGenerate options for this request. Markup is the one the
++// stock cloud uses itself (seen in native_cloud_voice_markup):
++//
++//	whisper: <speaker is_whisper="true">
++//	emotion: <speaker voice="emotional_alice.gpu" emotion="calm_happy">
++func ttsStyle(ctx context.Context, text string) (string, *float64, *string) {
++	v := voiceFrom(ctx)
++	var volume *float64
++	prefix := ""
++	if v.isWhisper("tts") {
++		w := os.Getenv("QUASAR_WHISPER_TTS_PREFIX")
++		if w == "" {
++			w = `<speaker is_whisper="true">`
++		}
++		if w != "-" {
++			prefix += w
++		}
++		if vol := envFloat("QUASAR_WHISPER_TTS_VOLUME", 0.5); vol > 0 {
++			volume = &vol
++		}
++	}
++	if envOn("QUASAR_TTS_EMOTION", true) {
++		if e := ttsEmotion(v.getEmotion()); e != "" {
++			voice := os.Getenv("QUASAR_TTS_EMOTION_VOICE")
++			if voice == "" {
++				voice = "emotional_alice.gpu"
++			}
++			prefix += `<speaker voice="` + voice + `" emotion="` + e + `">`
++		}
++	}
++	return prefix + text, volume, nil
++}
++
++// ttsEmotion maps our mood to the synthesis emotion; others are set via QUASAR_TTS_EMOTION_MAP,
++// e.g. "joy=calm_happy,love=calm_happy,sad=sad".
++func ttsEmotion(mood string) string {
++	// accepted by Yandex TTS for emotional_alice.gpu (sweep 2026-11-10):
++	// calm_happy, sad, neutral, energetic; others time out.
++	m := map[string]string{"joy": "calm_happy", "love": "calm_happy", "wow": "energetic", "sad": "sad", "angry": "energetic"}
++	if spec := os.Getenv("QUASAR_TTS_EMOTION_MAP"); spec != "" {
++		m = map[string]string{}
++		for _, kv := range strings.Split(spec, ",") {
++			if k, val, ok := strings.Cut(strings.TrimSpace(kv), "="); ok && regexp.MustCompile(`^[a-z_]{1,32}$`).MatchString(val) {
++				m[k] = val
++			}
++		}
++	}
++	return m[mood]
++}
++
++// cloudSmile is the stock clock-screen animation the cloud sends with
++// «ты молодец» / «я тебя люблю» on the Station Midi (19 frames, gzip).
++const cloudSmile = "H4sIAAAAAAAAA52SQQqAQAhFjVZBSw/koTqAN/NS7aeGxkD6Qo6LEXmP4SMSlYpHl1wJyH3N/YDct9wPyP2W+wExidxNoA8Qk/Z8Cn2AmKznM+gDxNT63KD/ReueqI//Pl7bUf6/mr+6n+r+R1TkAzR7P5r7Ac3e/89azgtrDSgqkAMAAA=="
++
++// emotionAnimation returns the gzip+base64 clock animation for a mood:
++// a custom file /data/opt/quasar-bridge/emotions/<mood>.scled (raw frames:
++// 46 segment bytes + 2 bytes duration each, as in the cloud animation) wins,
++// then our built-in pictures, joy uses the stock smile.
++func emotionAnimation(mood string) string {
++	dir := envPath("QUASAR_EMOTIONS_DIR", "/data/opt/quasar-bridge/emotions")
++	if raw, err := os.ReadFile(dir + "/" + mood + ".scled"); err == nil && len(raw) > 0 && len(raw) < 1<<16 {
++		var buf bytes.Buffer
++		zw := gzip.NewWriter(&buf)
++		_, _ = zw.Write(raw)
++		_ = zw.Close()
++		return base64.StdEncoding.EncodeToString(buf.Bytes())
++	}
++	if a, ok := clockEmotions[mood]; ok {
++		return a
++	}
++	if mood == "joy" {
++		return cloudSmile
++	}
++	return ""
++}
++
++// clockEmotions are our own clock pictures (quasar-bridge/clock-emotions/gen.py,
++// segment map measured on the Midi): sad = flat eyes, frown and a tear;
++// angry = slanted brows; wow = wide eyes and an O mouth; love = ^ ^ and a
++// heartbeat on the colon.
++var clockEmotions = map[string]string{
++	"sad":   "H4sIAAAAAAAC/2NgAAMHMIIQDg4MyACFJwKlG8AIQjQ0oKhvwKZ+PxhBiP37UdTvx6b+PxhBiP//UdT/p0A9UwRMDXHqGVkQhhOvnkTzB5t7SA1PcuKX1PRDavokEjB+AQBgZQXLAAMAAA==",
++	"angry": "H4sIAAAAAAAC/2NgcGAAAjABJZEZQCYSm4FBhIGhAUSDCSiJzAAyG9DU7wfRYAJKIjOAzP1o6v+DaDABJZEZQOZ/CtQzfiHR/AUoCrCpR2EzVIws80HhSWr8kpp+SE2fpADGLwCy72NMAAMAAA==",
++	"wow":   "H4sIAAAAAAAC/52QwQ1AIQhD68k/gAM5mpu51L8rxSZ4RdL0WeGAoncANErBcW6hs6phDAONUnAgWvf8nAYapeBAtO75tQw0SsGBaD3P1y+9T/a92f9MVfk3dvPEjbABAAA=",
++	"love":  "H4sIAAAAAAAC/2NwcGDABRzgBByIMDQ04FTfACeQ1O/fj1P9fjiBpP7/f5zq/8MJctUz6hCnHq6oh0T35NHWfMYlo+4fYPeTmp5JzS+k5keSAOMXAO35bHHwAwAA",
++}
++
++// emotionDirective draws the emotion on the clock screen the way the cloud does.
++func emotionDirective(ctx context.Context) *directives.TDirective {
++	if !envOn("QUASAR_EMOTION_ANIMATION", true) {
++		return nil
++	}
++	anim := emotionAnimation(voiceFrom(ctx).getEmotion())
++	if anim == "" {
++		return nil
++	}
++	payload, err := proto.Marshal(&animation.TAnimationCapability_TDrawAnimationDirective{
++		AnimationStopPolicy: animation.TAnimationCapability_TDrawAnimationDirective_PlayOnce,
++		Animations: []*animation.TAnimationCapability_TDrawAnimationDirective_TAnimation{{
++			Value: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_BinaryAnimation{
++				BinaryAnimation: &animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TBinaryAnimation{
++					Compression:        animation.TAnimationCapability_TDrawAnimationDirective_TAnimation_TBinaryAnimation_Gzip,
++					Base64EncodedValue: anim,
++				},
++			},
++		}},
++	})
++	if err != nil {
++		return nil
++	}
++	return &directives.TDirective{Type: "client_action", Name: "draw_animation_directive", AnalyticsType: "draw_animation_directive", IsLedSilent: true, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
++}
++
++// emotionFirst orders the reply like the cloud does: the clock picture first,
++// then the speech placeholder, so the clock plays while Alice talks instead
++// of after the phrase.
++func emotionFirst(d *directives.TDirective, rest []*directives.TDirective) []*directives.TDirective {
++	if len(rest) == 0 {
++		rest = []*directives.TDirective{{Type: "client_action", Name: "tts_play_placeholder"}}
++	}
++	return append([]*directives.TDirective{d}, rest...)
++}
++
++// ---- no obscene language ----
++
++const matPrefixes = `(?:по|на|за|от|ото|раз|рас|разъ|вы|до|у|при|об|объ|о|пере|под|подъ|въ|съ|недо|ни)?`
++
++var matWordRes = []*regexp.Regexp{
++	regexp.MustCompile(`^` + matPrefixes + `х[уy](?:й|е|ё|я|ю|и)`),
++	regexp.MustCompile(`пизд`),
++	regexp.MustCompile(`^` + matPrefixes + `[её]б(?:а|у|л|н|ё|е|и|ы|т|к|ищ|ну)`),
++	regexp.MustCompile(`^` + matPrefixes + `бля(?:д|т|$)`),
++	regexp.MustCompile(`^` + matPrefixes + `муд(?:ак|ач|ил|оз|охл)`),
++	regexp.MustCompile(`пид[оа]р`),
++	regexp.MustCompile(`долбо[её]б`),
++	regexp.MustCompile(`^залуп`),
++	regexp.MustCompile(`^` + matPrefixes + `дроч`),
++	regexp.MustCompile(`^манд(?:а|ы|е|у|ой|ёнок)$`),
++}
++var wordRe = regexp.MustCompile(`[\p{L}]+`)
++
++// hasMat reports whether text contains Russian obscene words.
++func hasMat(text string) bool {
++	for _, w := range wordRe.FindAllString(strings.ToLower(text), -1) {
++		if matWord(w) {
++			return true
++		}
++	}
++	return false
++}
++func matWord(w string) bool {
++	for _, re := range matWordRes {
++		if re.MatchString(w) {
++			return true
++		}
++	}
++	return false
++}
++
++// stripMat removes obscene words as the last resort.
++func stripMat(text string) string {
++	out := wordRe.ReplaceAllStringFunc(text, func(w string) string {
++		if matWord(strings.ToLower(w)) {
++			return ""
++		}
++		return w
++	})
++	out = regexp.MustCompile(`\s+([,.!?])`).ReplaceAllString(out, "$1")
++	out = regexp.MustCompile(`,(?:\s*,)+`).ReplaceAllString(out, ",")
++	out = regexp.MustCompile(`,\s*([.!?])`).ReplaceAllString(out, "$1")
++	out = regexp.MustCompile(`\s{2,}`).ReplaceAllString(out, " ")
++	return strings.TrimSpace(out)
++}
++
++const rewriteNoMat = "Перепиши ответ голосовой колонки без нецензурной лексики и без грубых ругательств. Сохрани смысл, иронию и остроумие, ответ должен остаться колким, но приличным. Верни только новый текст ответа, без пояснений и без кавычек."
++
++var markupRe = regexp.MustCompile(`<[^<>]{1,120}>`)
++
++// cloudMarkup lists the distinct markup tags of a cloud voice text.
++func cloudMarkup(text string) string {
++	seen := map[string]bool{}
++	var out []string
++	for _, t := range markupRe.FindAllString(text, 20) {
++		if !seen[t] {
++			seen[t] = true
++			out = append(out, t)
++		}
++	}
++	return strings.Join(out, " ")
++}
++
++// matchedUser applies the on-device voice biometry result that aliced sends
++// as a MatchedUser event after the phrase (the VoiceInput itself has none).
++func (v *voiceInfo) matchedUser(mu *request.TAliceRequestProto) {
++	if v == nil || mu == nil {
++		return
++	}
++	add := mu.GetRequest().GetAdditionalOptions()
++	g := add.GetGuestUserOptions()
++	users := []string{}
++	for _, u := range add.GetUsersOptions() {
++		if u.GetPersId() != "" {
++			users = append(users, shortHash(u.GetPersId()))
++		} else if u.GetPuid() != "" {
++			users = append(users, "puid:"+shortHash(u.GetPuid()))
++		}
++	}
++	enrolled := []string{}
++	for _, h := range mu.GetEnrollmentHeaders().GetHeaders() {
++		enrolled = append(enrolled, h.GetUserType().String()+":"+shortHash(h.GetPersonId()))
++	}
++	for _, h := range g.GetEnrollmentHeaders().GetHeaders() {
++		enrolled = append(enrolled, "g"+h.GetUserType().String()+":"+shortHash(h.GetPersonId()))
++	}
++	speaker := ""
++	if g.GetStatus().String() == "Match" && g.GetPersId() != "" {
++		speaker = "pers:" + shortHash(g.GetPersId())
++	}
++	v.mu.Lock()
++	if speaker != "" {
++		v.speaker = speaker
++	}
++	v.mu.Unlock()
++	slog.Info("native_matched_user", "request", v.id, "guest", g != nil, "guest_origin", g.GetGuestOrigin().String(),
++		"guest_status", g.GetStatus().String(), "guest_confidence", g.GetMatchConfidence().String(),
++		"confidence10", g.GetConfidenceLevel10(), "owner_enrolled", g.GetIsOwnerEnrolled(),
++		"guest_pers", func() string {
++			if g.GetPersId() == "" {
++				return ""
++			}
++			return shortHash(g.GetPersId())
++		}(), "users", strings.Join(users, ","), "enrolled", strings.Join(enrolled, ","), "speaker", speaker)
++}
++
++// logCloudDirectives records how the stock cloud draws emotions on the clock:
++// animation directives in full (they carry no user data).
++func logCloudDirectives(ds []*directives.TDirective) {
++	for _, d := range ds {
++		if !strings.Contains(d.GetName(), "animation") && !strings.Contains(d.GetName(), "emotion") {
++			continue
++		}
++		body := ""
++		if raw := d.GetPayloadRaw(); len(raw) > 0 {
++			var m animation.TAnimationCapability_TDrawAnimationDirective
++			if err := proto.Unmarshal(raw, &m); err == nil {
++				body = protojson.Format(&m)
++			} else {
++				body = fmt.Sprintf("raw:%x", raw)
++			}
++		} else if pl := d.GetPayload(); pl != nil {
++			body = protojson.Format(pl)
++		}
++		if len(body) > 6000 {
++			body = body[:6000]
++		}
++		slog.Info("native_cloud_animation", "name", d.GetName(), "type", d.GetType(), "directive_type", d.GetDirectiveType().String(), "led_silent", d.GetIsLedSilent(), "payload", body)
++	}
++}
++
++// nightMode: QUASAR_WHISPER_NIGHT="23:15-06:30" (Moscow time) — replies are
++// whispered and short in this window, whatever the detector says.
++func nightMode(now time.Time) bool {
++	spec := strings.TrimSpace(os.Getenv("QUASAR_WHISPER_NIGHT"))
++	from, to, ok := strings.Cut(spec, "-")
++	if !ok {
++		return false
++	}
++	parse := func(t string) (int, bool) {
++		h, m, ok := strings.Cut(strings.TrimSpace(t), ":")
++		hh, e1 := strconv.Atoi(h)
++		mm, e2 := strconv.Atoi(m)
++		if !ok || e1 != nil || e2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
++			return 0, false
++		}
++		return hh*60 + mm, true
++	}
++	a, ok1 := parse(from)
++	b, ok2 := parse(to)
++	if !ok1 || !ok2 || a == b {
++		return false
++	}
++	t := now.In(moscow())
++	cur := t.Hour()*60 + t.Minute()
++	if a < b {
++		return cur >= a && cur < b
++	}
++	return cur >= a || cur < b
 +}
 diff --git a/internal/llm/client.go b/internal/llm/client.go
 index 15a05f2..dedc6c3 100644
