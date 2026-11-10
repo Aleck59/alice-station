@@ -56,7 +56,7 @@ index a483ccf..4bcb633 100644
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..5fb5b9e 100644
+index d26c9d7..650f66b 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
 @@ -88,6 +88,7 @@ type Native struct {
@@ -202,7 +202,7 @@ index d26c9d7..5fb5b9e 100644
  	}
  	answer.Response.Directives = n.takeSound(p)
 +	if d := emotionDirective(p.ctx); d != nil && !silentPlayback {
-+		answer.Response.Directives = append(answer.Response.Directives, d)
++		answer.Response.Directives = emotionFirst(d, answer.Response.Directives)
 +	}
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
@@ -974,10 +974,10 @@ index 0000000..388b396
 +}
 diff --git a/internal/bridge/voicestyle.go b/internal/bridge/voicestyle.go
 new file mode 100644
-index 0000000..cf45a6f
+index 0000000..0f675e3
 --- /dev/null
 +++ b/internal/bridge/voicestyle.go
-@@ -0,0 +1,566 @@
+@@ -0,0 +1,576 @@
 +package bridge
 +
 +// Voice style for the LLM route (Alice Station patch): whisper, speaker
@@ -1377,6 +1377,16 @@ index 0000000..cf45a6f
 +		return nil
 +	}
 +	return &directives.TDirective{Type: "client_action", Name: "draw_animation_directive", AnalyticsType: "draw_animation_directive", IsLedSilent: true, PayloadType: &directives.TDirective_PayloadRaw{PayloadRaw: payload}}
++}
++
++// emotionFirst orders the reply like the cloud does: the clock picture first,
++// then the speech placeholder, so the clock plays while Alice talks instead
++// of after the phrase.
++func emotionFirst(d *directives.TDirective, rest []*directives.TDirective) []*directives.TDirective {
++	if len(rest) == 0 {
++		rest = []*directives.TDirective{{Type: "client_action", Name: "tts_play_placeholder"}}
++	}
++	return append([]*directives.TDirective{d}, rest...)
 +}
 +
 +// ---- no obscene language ----
