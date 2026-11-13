@@ -2,7 +2,7 @@
 
 ## ytm-alice (SPAWNRYS-ban/ytm-alice 0.7.5)
 
-`ytm-alice/ytm-alice` собран из 0.7.5 (255d182) + upstream PR #20 и #21 (Lykoi18, ещё не влиты) с патчем `ytm-alice-midi.patch`
+`ytm-alice/ytm-alice` собран из 0.7.6 (c118c8a, уже включает PR #20 и #21) с патчем `ytm-alice-midi.patch`
 (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w'`):
 
 - одно постоянное подключение к aliced :9875 без 2-секундного ReadDeadline.
@@ -22,7 +22,7 @@
 - голосовой лайк: «лайк», «поставь лайк», «лайкни», «мне нравится» (нужен
   вход в аккаунт в панели).
 
-Плеер, резолвер и bt-proxy — штатные из пакета 0.7.4: в 0.7.5 они не менялись. Своей подсветки ytm-alice не рисует:
+Плеер, резолвер и bt-proxy — штатные из пакета 0.7.4: в 0.7.5–0.7.6 они не менялись. Своей подсветки ytm-alice не рисует:
 кольцо полностью за Алисой (через медиаслой она видит YouTube как Bluetooth).
 
 Установка: сохранить `/data/yam/bin/ytm-alice` как `ytm-alice.orig`, заменить,
