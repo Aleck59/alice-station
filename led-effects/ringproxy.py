@@ -82,6 +82,22 @@ EMOTION_COLORS = {
 }
 
 
+def gradient(a, b):
+    out = []
+    for i in range(N):
+        t = 0.5 - 0.5 * math.cos(2 * math.pi * i / N)
+        out.append(tuple(round(a[c] + (b[c] - a[c]) * t) for c in range(3)))
+    return out
+
+
+# Речь: ассистент — розовый, штатная Алиса — её фиолетовый 370fff
+# (Яндекс со временем менял цвет речи на сервере, поэтому задаём явно).
+ASSISTANT_SPEECH = gradient((255, 20, 120), (255, 110, 200))
+ALICE_SPEECH = [(0x37, 0x0F, 0xFF)] * N
+# Цвет эмоции вместо розового — только если включено (RING_EMOTIONS=1).
+USE_EMOTIONS = os.environ.get("RING_EMOTIONS") == "1"
+
+
 def emotion_palette():
     try:
         if time.time() - os.stat(EMOTION).st_mtime >= ROUTE_TTL:
@@ -195,12 +211,16 @@ def main() -> None:
                 if m:
                     spectro = b"spectrogram" in m.group(1)
             speech = spectro and voice
-            assistant = speech and assistant_route()
-            stock_now = speech and not assistant
-            use_pal = (emotion_palette() or pal) if assistant else pal
+            if speech:
+                if assistant_route():
+                    use_pal = (USE_EMOTIONS and emotion_palette()) or ASSISTANT_SPEECH
+                else:
+                    use_pal = ALICE_SPEECH
+            else:
+                use_pal = pal
             frame = os.pread(fb, 3 * N, 0)
             if len(frame) == 3 * N:
-                vals = recolor(frame, None if stock_now else use_pal, everything=spectro)
+                vals = recolor(frame, use_pal, everything=spectro)
                 # Пишем только изменившиеся каналы (быстро, без задержки кадра),
                 # а раз в 0,5 с — все 72, на случай если контроллер что-то не применил.
                 full = t0 - full_at > 0.5

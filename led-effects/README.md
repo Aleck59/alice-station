@@ -45,18 +45,13 @@
 
 ### Цвет по тому, кто отвечает
 
-ringproxy читает журнал maind и знает, что сейчас на кольце: речь
-(`Creating spectrogram: pulsing_voice`) или музыка (ball/blink/disco/polar).
-Речь красится в тему, только если `/var/run/alice-route` моложе 45 с и
-содержит `assistant` (ответ нашего ассистента через Quasar Bridge); иначе —
-штатный фиолетовый (ответила Алиса, fallback или режим observe). Музыка
-и прочие штатные анимации — всегда в цветах темы. Файл пишет мост
-(`QUASAR_ROUTE_FILE`), сторож при переходе в observe пишет `alice`.
-
-Если мост пишет эмоцию ответа в `/var/run/alice-emotion` (`joy`, `sad`, `wow`,
-`angry`, `love`, `neutral`; путь — `QUASAR_EMOTION_FILE`), речь ассистента
-подкрашивается цветом эмоции (жёлтый, синий, бирюза-маджента, красный, розовый);
-`neutral` или старый файл — цвета темы.
+ringproxy читает журнал maind (`Play animations: [ ring_spectrogram ]`,
+`Creating  spectrogram: pulsing_voice`) и знает, что на кольце: речь, музыка
+или .led-анимация. Речь перекрашивается целиком (цвет речи Яндекс меняет на
+сервере): **ассистент — розовый**, если `/var/run/alice-route` моложе 45 с и
+содержит `assistant` (пишет Quasar Bridge); иначе **Алиса — фиолетовый 370fff**.
+Музыка — цвета темы. С `RING_EMOTIONS=1` речь ассистента берёт цвет эмоции из
+`/var/run/alice-emotion` (joy/sad/wow/angry/love).
 
 ## Откат
 
