@@ -1,7 +1,10 @@
 #!/bin/sh
-# Сторож моста: если Mistral не отвечает дольше FAIL_SEC (60 с), мост
-# (два запроса подряд, шаг 30 с) переводится в observe — все запросы снова обслуживает Алиса. Когда модель
-# вернётся, мост снова в hybrid. Если сам мост не отвечает — перезапуск.
+# Сторож моста. Мост проверяется каждые STEP (30 с), если не отвечает FAIL_SEC
+# (60 с) — перезапуск. Модель проверяется редко (LLM_STEP, 5 мин): на бесплатном
+# Mistral всего 2 запроса в минуту, и частые проверки съедали их у пользователя.
+# Если модель отказывает дольше LLM_FAIL_SEC (15 мин), мост переводится в observe
+# (всё обслуживает Алиса); вернулась — снова hybrid. 429 (лимит частоты) считается
+# «модель жива»: мост сам отдаёт такой запрос Алисе (QUASAR_LLM_FAIL_TO_ALICE).
 # Запуск: llm-watchdog.sh start|stop|status|run
 D=${QUASAR_DATA_DIR:-/data/opt/quasar-bridge}
 CFG=$D/config.json
@@ -12,6 +15,8 @@ LOG=$D/llm-watchdog.log
 STEP=${STEP:-30}
 MODEL=$(sed -n 's/.*"llm_model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -n 1)
 FAIL_SEC=${FAIL_SEC:-60}
+LLM_STEP=${LLM_STEP:-300}
+LLM_FAIL_SEC=${LLM_FAIL_SEC:-900}
 WANT=${WANT_MODE:-hybrid}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -26,17 +31,18 @@ set_mode() {
 key() { sed -n "s/^QUASAR_LLM_API_KEY=['\"]\{0,1\}\([^'\"]*\).*/\1/p" "$D/runtime.env" | head -n 1; }
 llm_ok() {
 	# Настоящий запрос к модели (1 токен): /v1/models отвечает 200 и при нулевой
-	# квоте, поэтому не годится. 429 и 5xx считаются отказом.
+	# квоте, поэтому не годится. 5xx, 401, 403 (нет в тарифе) — отказ; 429 — модель
+	# есть, просто лимит частоты.
 	code=$($CURL -s -o /dev/null -w '%{http_code}' -m 20 \
 		-H "Authorization: Bearer $(key)" -H 'Content-Type: application/json' \
 		-d "{\"model\":\"$MODEL\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ok\"}]}" \
 		https://api.mistral.ai/v1/chat/completions)
-	[ "$code" = 200 ]
+	[ "$code" = 200 ] || [ "$code" = 429 ]
 }
 bridge_ok() { $CURL -s -o /dev/null -m 5 http://127.0.0.1:8443/healthz; }
 
 run() {
-	llm_bad=0; br_bad=0
+	llm_bad=0; br_bad=0; llm_wait=0
 	while :; do
 		if bridge_ok; then br_bad=0; else
 			br_bad=$((br_bad + STEP))
@@ -44,12 +50,16 @@ run() {
 				log "bridge down ${br_bad}s, restart"; $CTL restart >> "$LOG" 2>&1; br_bad=0
 			fi
 		fi
-		if llm_ok; then
-			llm_bad=0; set_mode "$WANT" "LLM снова доступна"
-		else
-			llm_bad=$((llm_bad + STEP))
-			[ $llm_bad -ge $FAIL_SEC ] && set_mode observe "LLM недоступна ${llm_bad}s"
+		if [ $llm_wait -le 0 ]; then
+			llm_wait=$LLM_STEP
+			if llm_ok; then
+				llm_bad=0; set_mode "$WANT" "LLM снова доступна"
+			else
+				llm_bad=$((llm_bad + LLM_STEP))
+				[ $llm_bad -ge $LLM_FAIL_SEC ] && set_mode observe "LLM недоступна ${llm_bad}s"
+			fi
 		fi
+		llm_wait=$((llm_wait - STEP))
 		sleep "$STEP"
 	done
 }

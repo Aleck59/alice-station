@@ -1,3 +1,16 @@
+diff --git a/cmd/quasar-bridge/main.go b/cmd/quasar-bridge/main.go
+index 923899a..17f8545 100644
+--- a/cmd/quasar-bridge/main.go
++++ b/cmd/quasar-bridge/main.go
+@@ -304,6 +304,8 @@ func main() {
+ 			n := bridge.NewNative(ctx, up, down, engine)
+ 			n.GateText = false
+ 			n.ShouldListen = cfg.ListenAfterReply
++			// alice-station: when the model fails (rate limit, error) Alice answers instead of an error phrase
++			n.LLMFailToAlice = os.Getenv("QUASAR_LLM_FAIL_TO_ALICE") != "0"
+ 			if cfg.LocalProgress.Enabled {
+ 				n.ProgressAfter = time.Duration(cfg.LocalProgress.AfterMS) * time.Millisecond
+ 				n.ProgressInterval = time.Duration(cfg.LocalProgress.IntervalMS) * time.Millisecond
 diff --git a/internal/bridge/engine.go b/internal/bridge/engine.go
 index a483ccf..4bcb633 100644
 --- a/internal/bridge/engine.go
@@ -55,11 +68,71 @@ index a483ccf..4bcb633 100644
  	if err == nil {
  		if !e.dialogue().Commit(ctx, ticket, text, answer, private) {
  			return r, context.Canceled
+diff --git a/internal/bridge/fail_to_alice_test.go b/internal/bridge/fail_to_alice_test.go
+new file mode 100644
+index 0000000..02b8d77
+--- /dev/null
++++ b/internal/bridge/fail_to_alice_test.go
+@@ -0,0 +1,36 @@
++package bridge
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/coder/websocket"
++)
++
++// alice-station: a failed model answer (e.g. HTTP 429) goes to Alice instead of an error phrase.
++func TestNativeLLMFailureGoesToAlice(t *testing.T) {
++	n, up, down := soundSession(t, resolverFunc(func(context.Context, string) (Resolution, error) {
++		return Resolution{Route: "llm"}, errors.New("LLM returned HTTP 429")
++	}))
++	n.LLMFailToAlice = true
++	if err := n.Client(t.Context(), websocket.MessageBinary, soundInput("busy")); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case f := <-up:
++		if f.Client.GetEvent().GetTextInput() == nil || f.Client.GetEvent().GetHeader().GetMessageId() != "busy" {
++			t.Fatalf("unexpected upstream frame: %v", f.Kind())
++		}
++	case f := <-down:
++		t.Fatalf("local reply instead of Alice: %v", f.Kind())
++	case <-time.After(2 * time.Second):
++		t.Fatal("request was not handed to Alice")
++	}
++	select {
++	case f := <-down:
++		t.Fatalf("unexpected local reply: %v", f.Kind())
++	case <-time.After(200 * time.Millisecond):
++	}
++}
 diff --git a/internal/bridge/native.go b/internal/bridge/native.go
-index d26c9d7..650f66b 100644
+index d26c9d7..a4ad564 100644
 --- a/internal/bridge/native.go
 +++ b/internal/bridge/native.go
-@@ -88,6 +88,7 @@ type Native struct {
+@@ -78,16 +78,20 @@ type nativeRequest struct {
+ 	expires                         *time.Timer
+ }
+ type Native struct {
+-	connectionScope  string
+-	ctx              context.Context
+-	cancel           context.CancelFunc
+-	up, down         Sender
+-	resolver         Resolver
++	connectionScope string
++	ctx             context.Context
++	cancel          context.CancelFunc
++	up, down        Sender
++	resolver        Resolver
++	// LLMFailToAlice hands a request to the Yandex cloud when the model fails
++	// before any local audio started (alice-station).
++	LLMFailToAlice   bool
+ 	mu               sync.Mutex
+ 	requests         map[string]*nativeRequest
  	tts              map[string]*nativeRequest
  	streams          map[uint32]*nativeRequest
  	blocked          map[uint32]*nativeRequest
@@ -67,7 +140,7 @@ index d26c9d7..650f66b 100644
  	wg               sync.WaitGroup
  	OnRoute          func(id, route string)
  	GateText         bool
-@@ -114,10 +115,46 @@ func (n *Native) Close() {
+@@ -114,10 +118,46 @@ func (n *Native) Close() {
  }
  func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byte) error {
  	f := wire.Decode(data, wire.ClientToServer)
@@ -114,7 +187,7 @@ index d26c9d7..650f66b 100644
  	if stat := e.GetRequestStat(); stat != nil {
  		kind := "none"
  		raw := strings.ToLower(stat.GetError())
-@@ -158,6 +195,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+@@ -158,6 +198,8 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
  		}
  		pctx, cancel := context.WithTimeout(dialogue.WithSpeaker(n.ctx, scope), 90*time.Second)
  		pctx = reply.WithPolicy(pctx)
@@ -123,7 +196,7 @@ index d26c9d7..650f66b 100644
  		playerState := nativePlaybackState(req)
  		pctx = sound.WithPlaybackState(pctx, playerState)
  		slog.Info("native_player_state", "request", requestTag(id), "present", playerState.Present, "player_state", playerState.PlayerState, "offset_known", playerState.OffsetKnown, "offset_ms", playerState.OffsetMS, "has_stream", playerState.StreamID != "", "stream_tag", requestTag(playerState.StreamID))
-@@ -207,6 +246,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
+@@ -207,6 +249,17 @@ func (n *Native) Client(ctx context.Context, k websocket.MessageType, data []byt
  			}
  		})
  		n.requests[id] = p
@@ -141,7 +214,7 @@ index d26c9d7..650f66b 100644
  		n.mu.Unlock()
  		if p.gated {
  			gated, err := wire.EnableApproval(f)
-@@ -386,8 +436,13 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -386,8 +439,13 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  		for _, d := range r.GetResponse().GetDirectives() {
  			ds = append(ds, d.GetType()+":"+d.GetName())
  		}
@@ -155,7 +228,7 @@ index d26c9d7..650f66b 100644
  	}
  	if p == nil {
  		n.mu.Unlock()
-@@ -453,6 +508,7 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+@@ -453,12 +511,14 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  
  		if resolver, ok := n.resolver.(FallbackResolver); ok && n.isRefusal(text) {
  			p.local = true
@@ -163,7 +236,32 @@ index d26c9d7..650f66b 100644
  			if n.OnRoute != nil {
  				n.OnRoute(p.id, "llm")
  			}
-@@ -497,6 +553,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 			p.ttsID = newID()
+ 			n.tts[p.ttsID] = p
+ 			query := p.text
++			aliceText := text
+ 			n.mu.Unlock()
+ 			n.wg.Go(func() {
+ 				result, err := resolver.Fallback(p.ctx, query)
+@@ -470,8 +530,16 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
+ 					return
+ 				}
+ 				if err != nil {
++					// the model failed: say what Alice herself answered instead of an error phrase
+ 					n.discardSound(p)
+-					result.Answer = "Сейчас не получилось получить ответ локальной модели."
++					slog.Warn("native_fallback_failed_alice_text", "request", requestTag(p.id), "error", err)
++					result.Answer = ""
++					if n.LLMFailToAlice {
++						result.Answer = strings.TrimSpace(aliceText)
++					}
++					if result.Answer == "" {
++						result.Answer = "Сейчас не получилось получить ответ локальной модели."
++					}
+ 				}
+ 				_ = n.sendCancel(p.ctx, p.id)
+ 				if err := n.reply(p, result.Answer); err != nil {
+@@ -497,6 +565,17 @@ func (n *Native) Server(ctx context.Context, k websocket.MessageType, data []byt
  		if asr.GetEndOfUtt() {
  			p.final = true
  			slog.Info("native_asr_final", "request", requestTag(p.id), "hypotheses", len(asr.GetRecognition()), "code", asr.GetResponseCode().String())
@@ -181,7 +279,29 @@ index d26c9d7..650f66b 100644
  		}
  		if asr.GetEndOfUtt() && len(asr.GetRecognition()) > 0 {
  			r := asr.GetRecognition()[0]
-@@ -589,6 +656,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -580,8 +659,19 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+ 			} else if result.Route == "music" {
+ 				result.Answer = "Не удалось включить музыку с этой страницы."
+ 			} else {
+-				result.Route = "llm"
+-				result.Answer = "Сейчас не получилось получить ответ локальной модели."
++				n.mu.Lock()
++				canAlice := n.LLMFailToAlice && !p.streaming && !p.canceled
++				n.mu.Unlock()
++				if canAlice {
++					// the model failed before anything was played: hand the
++					// held request to the Yandex cloud so Alice answers it
++					slog.Warn("native_llm_failed_to_alice", "request", requestTag(p.id), "route", result.Route, "error", err)
++					result = Resolution{Route: "yandex"}
++				} else {
++					slog.Warn("native_llm_failed", "request", requestTag(p.id), "route", result.Route, "error", err)
++					result.Route = "llm"
++					result.Answer = "Сейчас не получилось получить ответ локальной модели."
++				}
+ 			}
+ 		}
+ 		n.mu.Lock()
+@@ -589,6 +679,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			n.mu.Unlock()
  			return
  		}
@@ -189,7 +309,7 @@ index d26c9d7..650f66b 100644
  		if n.OnRoute != nil {
  			n.OnRoute(p.id, result.Route)
  		}
-@@ -612,6 +680,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
+@@ -612,6 +703,7 @@ func (n *Native) maybeResolve(p *nativeRequest) {
  			}
  			n.mu.Unlock()
  			slog.Info("native_route", "request", requestTag(p.id), "route", "yandex", "sent", err == nil)
@@ -197,7 +317,7 @@ index d26c9d7..650f66b 100644
  			return
  		}
  		p.local = true
-@@ -655,6 +724,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -655,6 +747,9 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  		answer.VoiceResponse.OutputSpeech.Text = new("")
  	}
  	answer.Response.Directives = n.takeSound(p)
@@ -207,7 +327,7 @@ index d26c9d7..650f66b 100644
  	m := &server.TServerMessage{Message: &server.TServerMessage_Event{Event: &server.TServerMessage_TEvent{Header: &header.TEventHeader{MessageId: newID(), RefMessageId: p.id}, Event: &server.TServerMessage_TEvent_AliceResponse{AliceResponse: answer}}}}
  	b, err := (wire.Frame{Server: m, Prefix: []byte("AAPI")}).Marshal()
  	if err != nil {
-@@ -675,7 +747,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
+@@ -675,7 +770,8 @@ func (n *Native) reply(p *nativeRequest, text string) error {
  	return n.synthesize(p, text)
  }
  func (n *Native) synthesize(p *nativeRequest, text string) error {

@@ -10,11 +10,10 @@
     "::1"
   ],
   "llm_base_url": "https://api.mistral.ai/v1",
-  "llm_model": "mistral-large-4",
+  "llm_model": "ministral-14b-latest",
   "llm_api": "chat_completions",
   "llm_chat_parameters": {
     "chat_template_kwargs": null,
-    "reasoning_effort": "low",
     "temperature": 0.3,
     "max_tokens": 2048
   },
@@ -125,9 +124,18 @@
             "пылесос",
             "телевизор",
             "штор",
-            "который час", "сколько время", "сколько сейчас времени",
-            "запомни мой голос", "запомни голос", "запиши мой голос", "перезапиши мой голос", "забудь мой голос",
-            "как меня зовут", "кто я", "узнаёшь мой голос", "узнаешь мой голос",
+            "который час",
+            "сколько время",
+            "сколько сейчас времени",
+            "запомни мой голос",
+            "запомни голос",
+            "запиши мой голос",
+            "перезапиши мой голос",
+            "забудь мой голос",
+            "как меня зовут",
+            "кто я",
+            "узнаёшь мой голос",
+            "узнаешь мой голос",
             "сколько времени",
             "разбуди",
             "чайник",
@@ -230,9 +238,9 @@
   },
   "assistant_tools": {
     "enabled": true,
-    "web": true,
-    "history": true,
-    "time": true,
+    "web": false,
+    "history": false,
+    "time": false,
     "play_sound": false,
     "updates": false,
     "configuration": false,
@@ -247,7 +255,7 @@
   },
   "local_progress": {
     "enabled": true,
-    "after_ms": 2000,
+    "after_ms": 4000,
     "interval_ms": 4000
   },
   "dialogue_context": {
